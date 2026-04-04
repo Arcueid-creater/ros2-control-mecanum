@@ -8,7 +8,14 @@
             <plugin>tide_hw_interface/TideHardwareInterface</plugin>
             <param name="enable_virtual_control">true</param>
             <param name="need_calibration">false</param>
-            <param name="can_device_count">0</param>
+            <param name="serial_port">/dev/ttyACM0</param>
+            <param name="baud_rate">921600</param>
+            <!-- IMU Configuration -->
+            <param name="imu_serial_port">/dev/ttyUSB0</param>
+            <param name="imu_baud_rate">921600</param>
+            <param name="publish_imu_data">true</param>
+            <param name="publish_rpy">true</param>
+            <param name="imu_frame_id">imu_link</param>
         </hardware>
 
         <joint name="pitch_joint">

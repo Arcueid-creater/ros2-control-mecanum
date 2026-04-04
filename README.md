@@ -14,6 +14,7 @@
 
 ⚠️：第一次运行实车前，如果需要控制真实硬件，请将兵种_real.xacro中的```enable_virtual_control```参数设置为```false```关闭虚拟控制，以及```need_calibration```参数设置为```true```开启校准模式，手动将云台摆放到你期望的初始位置，将终端输出结果填到对应电机关节的```offset```参数（较烦琐待优化），否则会有疯车风险！！
 
+ros2 topic echo /serial_received_data
 
 ## 安装依赖
 ```

@@ -15,52 +15,150 @@
 #include <set>
 #include <iomanip>
 
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <cstring>
+#include <poll.h>
+
 namespace tide_hw_interface
 {
 
-CanDevice::CanDevice(const std::string& interface_name, ReceiveCallback callback)
-  : interface(interface_name)
-  , thread_running(std::make_shared<std::atomic<bool>>(true))
-  , receive_callback_(std::move(callback))
+static const uint16_t CRC16_TABLE[256] = {
+    0x0000,0x1021,0x2042,0x3063,0x4084,0x50A5,0x60C6,0x70E7,0x8108,0x9129,0xA14A,0xB16B,0xC18C,0xD1AD,0xE1CE,0xF1EF,
+    0x1231,0x0210,0x3273,0x2252,0x52B5,0x4294,0x72F7,0x62D6,0x9339,0x8318,0xB37B,0xA35A,0xD3BD,0xC39C,0xF3FF,0xE3DE,
+    0x2462,0x3443,0x0420,0x1401,0x64E6,0x74C7,0x44A4,0x5485,0xA56A,0xB54B,0x8528,0x9509,0xE5EE,0xF5CF,0xC5AC,0xD58D,
+    0x3653,0x2672,0x1611,0x0630,0x76D7,0x66F6,0x5695,0x46B4,0xB75B,0xA77A,0x9719,0x8738,0xF7DF,0xE7FE,0xD79D,0xC7BC,
+    0x48C4,0x58E5,0x6886,0x78A7,0x0840,0x1861,0x2802,0x3823,0xC9CC,0xD9ED,0xE98E,0xF9AF,0x8948,0x9969,0xA90A,0xB92B,
+    0x5AF5,0x4AD4,0x7AB7,0x6A96,0x1A71,0x0A50,0x3A33,0x2A12,0xDBFD,0xCBDC,0xFBBF,0xEB9E,0x9B79,0x8B58,0xBB3B,0xAB1A,
+    0x6CA6,0x7C87,0x4CE4,0x5CC5,0x2C22,0x3C03,0x0C60,0x1C41,0xEDAE,0xFD8F,0xCDEC,0xDDCD,0xAD2A,0xBD0B,0x8D68,0x9D49,
+    0x7E97,0x6EB6,0x5ED5,0x4EF4,0x3E13,0x2E32,0x1E51,0x0E70,0xFF9F,0xEFBE,0xDFDD,0xCFFC,0xBF1B,0xAF3A,0x9F59,0x8F78,
+    0x9188,0x81A9,0xB1CA,0xA1EB,0xD10C,0xC12D,0xF14E,0xE16F,0x1080,0x00A1,0x30C2,0x20E3,0x5004,0x4025,0x7046,0x6067,
+    0x83B9,0x9398,0xA3FB,0xB3DA,0xC33D,0xD31C,0xE37F,0xF35E,0x02B1,0x1290,0x22F3,0x32D2,0x4235,0x5214,0x6277,0x7256,
+    0xB5EA,0xA5CB,0x95A8,0x8589,0xF56E,0xE54F,0xD52C,0xC50D,0x34E2,0x24C3,0x14A0,0x0481,0x7466,0x6447,0x5424,0x4405,
+    0xA7DB,0xB7FA,0x8799,0x97B8,0xE75F,0xF77E,0xC71D,0xD73C,0x26D3,0x36F2,0x0691,0x16B0,0x6657,0x7676,0x4615,0x5634,
+    0xD94C,0xC96D,0xF90E,0xE92F,0x99C8,0x89E9,0xB98A,0xA9AB,0x5844,0x4865,0x7806,0x6827,0x18C0,0x08E1,0x3882,0x28A3,
+    0xCB7D,0xDB5C,0xEB3F,0xFB1E,0x8BF9,0x9BD8,0xABBB,0xBB9A,0x4A75,0x5A54,0x6A37,0x7A16,0x0AF1,0x1AD0,0x2AB3,0x3A92,
+    0xFD2E,0xED0F,0xDD6C,0xCD4D,0xBDAA,0xAD8B,0x9DE8,0x8DC9,0x7C26,0x6C07,0x5C64,0x4C45,0x3CA2,0x2C83,0x1CE0,0x0CC1,
+    0xEF1F,0xFF3E,0xCF5D,0xDF7C,0xAF9B,0xBFBA,0x8FD9,0x9FF8,0x6E17,0x7E36,0x4E55,0x5E74,0x2E93,0x3EB2,0x0ED1,0x1EF0
+};
+
+uint16_t TideHardwareInterface::calculateCRC16(const uint8_t* data, size_t len)
 {
-  sender = std::make_shared<SocketCanSender>(interface_name, false);
-  receiver = std::make_shared<SocketCanReceiver>(interface_name, false);
-  receiver_thread = std::make_shared<std::thread>(&CanDevice::receiveLoop, this);
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++)
+  {
+    uint8_t index = ((crc >> 8) ^ data[i]) & 0xFF;
+    // NOTE: Matching the Python dm_imu implementation which uses << 1
+    // Standard CRC-16 table-driven would use << 8, but we must match the device/Python logic
+    crc = ((crc << 1) ^ CRC16_TABLE[index]) & 0xFFFF;
+  }
+  return crc;
 }
 
-CanDevice::~CanDevice()
+SerialDevice::SerialDevice(const std::string& port_name, uint32_t baud_rate, ReceiveCallback callback)
+  : port_name_(port_name), baud_rate_(baud_rate), receive_callback_(std::move(callback))
 {
-  if (thread_running)
+  fd_ = open(port_name_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+  if (fd_ < 0)
   {
-    thread_running->store(false);
-    if (receiver_thread && receiver_thread->joinable())
-    {
-      receiver_thread->join();
-    }
+    throw std::runtime_error("Failed to open serial port: " + port_name_);
+  }
+
+  struct termios tty;
+  if (tcgetattr(fd_, &tty) != 0)
+  {
+    throw std::runtime_error("Failed to get serial attributes");
+  }
+
+  speed_t speed;
+  switch (baud_rate_)
+  {
+    case 115200: speed = B115200; break;
+    case 921600: speed = B921600; break;
+    default: speed = B115200; break;
+  }
+
+  cfsetospeed(&tty, speed);
+  cfsetispeed(&tty, speed);
+
+  tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
+  tty.c_iflag &= ~IGNBRK;
+  tty.c_lflag = 0;
+  tty.c_oflag = 0;
+  tty.c_cc[VMIN] = 0;
+  tty.c_cc[VTIME] = 5;
+
+  tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+  tty.c_cflag |= (CLOCAL | CREAD);
+  tty.c_cflag &= ~(PARENB | PARODD);
+  tty.c_cflag &= ~CSTOPB;
+  tty.c_cflag &= ~CRTSCTS;
+
+  if (tcsetattr(fd_, TCSANOW, &tty) != 0)
+  {
+    throw std::runtime_error("Failed to set serial attributes");
+  }
+
+  running_ = true;
+  thread_ = std::thread(&SerialDevice::run, this);
+}
+
+SerialDevice::~SerialDevice()
+{
+  running_ = false;
+  write_cv_.notify_all();
+  if (thread_.joinable())
+  {
+    thread_.join();
+  }
+  if (fd_ >= 0)
+  {
+    close(fd_);
   }
 }
 
-void CanDevice::receiveLoop()
+void SerialDevice::write(const std::vector<uint8_t>& data)
 {
-  std::array<uint8_t, 8> rx_data;
-  while (thread_running->load() && rclcpp::ok())
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  write_queue_.push(data);
+  write_cv_.notify_one();
+}
+
+void SerialDevice::run()
+{
+  std::vector<uint8_t> rx_buffer(1024);
+  struct pollfd fds[1];
+  fds[0].fd = fd_;
+  fds[0].events = POLLIN;
+
+  while (running_ && rclcpp::ok())
   {
-    try
+    // Check for data to write
     {
-      auto rx_frame = receiver->receive(rx_data.data(), std::chrono::milliseconds(1));
-      receive_callback_(rx_data, rx_frame.get());
-    }
-    catch (const SocketCanTimeout&)
-    {
-      continue;
-    }
-    catch (const std::exception& e)
-    {
-      if (thread_running->load())
+      std::unique_lock<std::mutex> lock(write_mutex_);
+      if (write_cv_.wait_for(lock, std::chrono::milliseconds(1), [this] { return !write_queue_.empty() || !running_; }))
       {
-        RCLCPP_ERROR(rclcpp::get_logger("CanDevice"), "Error in receive loop: %s", e.what());
+        if (!running_) break;
+        while (!write_queue_.empty())
+        {
+          // const auto& data = write_queue_.front();
+          // ::write(fd_, data.data(), data.size());
+          // write_queue_.pop();
+        }
       }
-      break;
+    }
+
+    // Check for data to read
+    int ret = poll(fds, 1, 10);
+    if (ret > 0 && (fds[0].revents & POLLIN))
+    {
+      ssize_t n = ::read(fd_, rx_buffer.data(), rx_buffer.size());
+      if (n > 0)
+      {
+        std::vector<uint8_t> data(rx_buffer.begin(), rx_buffer.begin() + n);
+        receive_callback_(data);
+      }
     }
   }
 }
@@ -87,7 +185,44 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
 
   enable_virtual_control_ = info_.hardware_parameters.at("enable_virtual_control") == "true";
   need_calibration_ = info_.hardware_parameters.at("need_calibration") == "true";
-  can_device_count_ = std::stoi(info_.hardware_parameters.at("can_device_count"));
+  serial_port_ = info_.hardware_parameters.at("serial_port");
+  baud_rate_ = std::stoi(info_.hardware_parameters.at("baud_rate"));
+
+  // IMU Parameters from URDF/ros2_control tag
+  if (info_.hardware_parameters.find("imu_serial_port") != info_.hardware_parameters.end()) {
+    imu_serial_port_ = info_.hardware_parameters.at("imu_serial_port");
+  } else {
+    imu_serial_port_ = serial_port_; // Default to same port if not specified
+  }
+  
+  if (info_.hardware_parameters.find("imu_baud_rate") != info_.hardware_parameters.end()) {
+    imu_baud_rate_ = std::stoi(info_.hardware_parameters.at("imu_baud_rate"));
+  } else {
+    imu_baud_rate_ = baud_rate_;
+  }
+
+  if (info_.hardware_parameters.find("publish_imu_data") != info_.hardware_parameters.end()) {
+    publish_imu_data_ = info_.hardware_parameters.at("publish_imu_data") == "true";
+  }
+  if (info_.hardware_parameters.find("publish_rpy") != info_.hardware_parameters.end()) {
+    publish_rpy_ = info_.hardware_parameters.at("publish_rpy") == "true";
+  }
+  if (info_.hardware_parameters.find("imu_frame_id") != info_.hardware_parameters.end()) {
+    imu_frame_id_ = info_.hardware_parameters.at("imu_frame_id");
+  }
+
+  nh_ = std::make_shared<rclcpp::Node>("tide_hw_imu_node");
+  if (publish_imu_data_) {
+    imu_pub_ = nh_->create_publisher<sensor_msgs::msg::Imu>("imu/data", 10);
+  }
+  if (publish_rpy_) {
+    rpy_pub_ = nh_->create_publisher<geometry_msgs::msg::Vector3Stamped>("imu/rpy", 10);
+  }
+
+  // Start IMU node spinning in a separate thread
+  imu_spin_thread_ = std::thread([this]() {
+    rclcpp::spin(nh_);
+  });
 
   for (const auto& joint : info_.joints)
   {
@@ -135,37 +270,50 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
     }
 
     auto motor = std::make_shared<DJI_Motor>(config);
-    configureMotorCan(motor);
+    // configureMotorCan(motor); // Removed CAN configuration
     motors_.push_back(motor);
   }
 
-  if (enable_virtual_control_)
+  // NOTE: Even if virtual control is enabled, we still want to read IMU data
+  // if real IMU hardware is connected.
+  // if (enable_virtual_control_)
+  // {
+  //   return hardware_interface::CallbackReturn::SUCCESS;
+  // }
+
+  try
   {
-    return hardware_interface::CallbackReturn::SUCCESS;
+    // Initialize separate serial devices
+    if (imu_serial_port_ != serial_port_) {
+      // 1. Independent Ports (Recommended): Different threads, different callbacks
+      auto motor_receive_callback = [this](const std::vector<uint8_t>& data) {
+        this->parseMotorData(data);
+      };
+      serial_device_ = std::make_shared<SerialDevice>(serial_port_, baud_rate_, motor_receive_callback);
+
+      auto imu_receive_callback = [this](const std::vector<uint8_t>& data) {
+        this->parseImuSerialData(data);
+      };
+      imu_serial_device_ = std::make_shared<SerialDevice>(imu_serial_port_, imu_baud_rate_, imu_receive_callback);
+      // RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "Independent ports: Motor (%s), IMU (%s)", serial_port_.c_str(), imu_serial_port_.c_str());
+    } else {
+      // 2. Shared Port: One thread, one callback handles both
+      auto shared_receive_callback = [this](const std::vector<uint8_t>& data) {
+        this->parseSharedData(data);
+      };
+      serial_device_ = std::make_shared<SerialDevice>(serial_port_, baud_rate_, shared_receive_callback);
+      imu_serial_device_ = nullptr; // Explicitly null to indicate sharing
+      // RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "Shared port: Motor and IMU on %s", serial_port_.c_str());
+    }
   }
-  for (size_t i = 0; i < can_device_count_; i++)
+  catch (const std::exception& e)
   {
-    std::string can_device_name = "can" + std::to_string(i);
-    const std::string bus_name = can_device_name;
-    auto receive_callback = [this, bus_name](const std::array<uint8_t, 8>& data, uint32_t can_id) {
-      rclcpp::Time current_time = rclcpp::Clock().now();
-      for (auto& motor : motors_)
-      {
-        if (motor->config_.can_bus == bus_name && motor->config_.rx_id == can_id)
-        {
-          motor->status = MOTOR_OK;
-          motor->rx_buff = data;
-          motor->decode_feedback();
-          motor->update_timestamp(current_time);
-          break;
-        }
-      }
-    };
-    can_devices_.push_back(std::make_shared<CanDevice>(can_device_name, receive_callback));
+    // RCLCPP_ERROR(rclcpp::get_logger("TideHardwareInterface"), "Failed to initialize serial device: %s", e.what());
+    return hardware_interface::CallbackReturn::ERROR;
   }
 
-  RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"),
-              "Successful loaded %ld motors and %ld can devices", joint_count, can_device_count_);
+  // RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"),
+              // "Successful loaded %ld motors and serial port %s", joint_count, serial_port_.c_str());
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -258,7 +406,18 @@ TideHardwareInterface::on_cleanup(const rclcpp_lifecycle::State& /*previous_stat
   try
   {
     stop_thread_ = true;
-    can_devices_.clear();
+    if (imu_spin_thread_.joinable())
+    {
+      // Since we don't want to call rclcpp::shutdown() which affects the whole process,
+      // we'll just let the thread be joined. 
+      // In many cases, the node will be destroyed and rclcpp::spin will return.
+      // imu_spin_thread_.join(); 
+      // Actually, joining a spinning thread without shutdown is tricky.
+      // We'll detach it or just not join it if we can't stop it cleanly.
+      imu_spin_thread_.detach();
+    }
+    serial_device_.reset();
+    imu_serial_device_.reset();
     motors_.clear();
     return hardware_interface::CallbackReturn::SUCCESS;
   }
@@ -269,55 +428,206 @@ TideHardwareInterface::on_cleanup(const rclcpp_lifecycle::State& /*previous_stat
   }
 }
 
-void TideHardwareInterface::configureMotorCan(std::shared_ptr<DJI_Motor> motor)
+void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
 {
-  switch (motor->config_.motor_type)
+  motor_rx_buffer_.insert(motor_rx_buffer_.end(), data.begin(), data.end());
+
+  while (motor_rx_buffer_.size() > 0)
   {
-    case M2006:
-    case M3508:
-      motor->config_.rx_id = 0x200 + motor->config_.tx_id;
-      if (motor->config_.tx_id <= 4)
+    if (motor_rx_buffer_[0] == 0x5A) // Motor feedback ONLY
+    {
+      if (motor_rx_buffer_.size() < sizeof(FeedbackPacket)) break;
+      FeedbackPacket packet;
+      std::memcpy(&packet, motor_rx_buffer_.data(), sizeof(FeedbackPacket));
+      
+      rclcpp::Time current_time = rclcpp::Clock().now();
+      for (auto& motor : motors_)
       {
-        motor->config_.identifier = 0x200;
+        if (motor->config_.tx_id == packet.motor_id)
+        {
+          motor->status = MOTOR_OK;
+          motor->measure.ecd = packet.ecd;
+          motor->measure.real_current = packet.given_current;
+          motor->measure.temperature = packet.temperature;
+          
+          motor->decode_feedback();
+          motor->update_timestamp(current_time);
+          break;
+        }
       }
-      else
-      {
-        motor->config_.tx_id -= 4;
-        motor->config_.identifier = 0x1ff;
-      }
-      break;
-    case GM6020:
-      motor->config_.rx_id = 0x204 + motor->config_.tx_id;
-      if (motor->config_.tx_id <= 4)
-      {
-        motor->config_.identifier = 0x1ff;
-      }
-      else
-      {
-        motor->config_.tx_id -= 4;
-        motor->config_.identifier = 0x2ff;
-      }
-      break;
-    default:
-      return;
+      motor_rx_buffer_.erase(motor_rx_buffer_.begin(), motor_rx_buffer_.begin() + sizeof(FeedbackPacket));
+    }
+    else
+    {
+      // Not a motor packet, discard one byte
+      motor_rx_buffer_.erase(motor_rx_buffer_.begin());
+    }
   }
 }
 
-bool TideHardwareInterface::sendCanFrame(std::shared_ptr<CanDevice> device, const uint8_t* data,
-                                         size_t len, uint32_t id)
+void TideHardwareInterface::parseSharedData(const std::vector<uint8_t>& data)
 {
-  try
+  // When sharing a port, we route data to both buffers but with strict header checks
+  motor_rx_buffer_.insert(motor_rx_buffer_.end(), data.begin(), data.end());
+  imu_rx_buffer_.insert(imu_rx_buffer_.end(), data.begin(), data.end());
+
+  // 1. Process Motor Data from shared buffer
+  while (motor_rx_buffer_.size() > 0)
   {
-    CanId send_id(id, 0, FrameType::DATA, StandardFrame);
-    device->sender->send(data, len, send_id, std::chrono::milliseconds(1));
+    if (motor_rx_buffer_[0] == 0x5A) {
+      if (motor_rx_buffer_.size() < sizeof(FeedbackPacket)) break;
+      FeedbackPacket packet;
+      std::memcpy(&packet, motor_rx_buffer_.data(), sizeof(FeedbackPacket));
+      for (auto& motor : motors_) {
+        if (motor->config_.tx_id == packet.motor_id) {
+          motor->status = MOTOR_OK;
+          motor->measure.ecd = packet.ecd;
+          motor->measure.real_current = packet.given_current;
+          motor->measure.temperature = packet.temperature;
+          motor->decode_feedback();
+          motor->update_timestamp(rclcpp::Clock().now());
+          break;
+        }
+      }
+      motor_rx_buffer_.erase(motor_rx_buffer_.begin(), motor_rx_buffer_.begin() + sizeof(FeedbackPacket));
+    } else {
+      motor_rx_buffer_.erase(motor_rx_buffer_.begin());
+    }
   }
-  catch (const std::exception& e)
+
+  // 2. Process IMU Data from shared buffer
+  while (imu_rx_buffer_.size() >= sizeof(ImuPacket))
   {
-    RCLCPP_ERROR(rclcpp::get_logger("TideHardwareInterface"), "Failed to send CAN frame: %s",
-                 e.what());
-    return false;
+    if (imu_rx_buffer_[0] == 0x55 && imu_rx_buffer_[1] == 0xAA) {
+      ImuPacket packet;
+      std::memcpy(&packet, imu_rx_buffer_.data(), sizeof(ImuPacket));
+      if (packet.tail == 0x0A) {
+        uint16_t crc_calc = calculateCRC16(imu_rx_buffer_.data(), 16);
+        if (crc_calc == packet.crc || calculateCRC16(imu_rx_buffer_.data() + 2, 14) == packet.crc) {
+          parseImuData(imu_rx_buffer_.data());
+        }
+      }
+      imu_rx_buffer_.erase(imu_rx_buffer_.begin(), imu_rx_buffer_.begin() + sizeof(ImuPacket));
+    } else {
+      imu_rx_buffer_.erase(imu_rx_buffer_.begin());
+    }
   }
-  return true;
+}
+
+void TideHardwareInterface::parseImuSerialData(const std::vector<uint8_t>& data)
+{
+  imu_rx_buffer_.insert(imu_rx_buffer_.end(), data.begin(), data.end());
+
+  while (imu_rx_buffer_.size() >= sizeof(ImuPacket))
+  {
+    if (imu_rx_buffer_[0] == 0x55 && imu_rx_buffer_[1] == 0xAA)
+    {
+      ImuPacket packet;
+      std::memcpy(&packet, imu_rx_buffer_.data(), sizeof(ImuPacket));
+      
+      if (packet.tail == 0x0A)
+      {
+        uint16_t crc_calc = calculateCRC16(imu_rx_buffer_.data(), 16);
+        if (crc_calc == packet.crc)
+        {
+          parseImuData(imu_rx_buffer_.data());
+        }
+        else
+        {
+          // Try without header (skip 0x55 0xAA)
+          uint16_t crc_calc_no_hdr = calculateCRC16(imu_rx_buffer_.data() + 2, 14);
+          if (crc_calc_no_hdr == packet.crc)
+          {
+            parseImuData(imu_rx_buffer_.data());
+          }
+        }
+      }
+      imu_rx_buffer_.erase(imu_rx_buffer_.begin(), imu_rx_buffer_.begin() + sizeof(ImuPacket));
+    }
+    else
+    {
+      imu_rx_buffer_.erase(imu_rx_buffer_.begin());
+    }
+  }
+}
+
+void TideHardwareInterface::parseImuData(const uint8_t* frame)
+{
+  ImuPacket packet;
+  std::memcpy(&packet, frame, sizeof(ImuPacket));
+
+  if (packet.rid == 0x03) // RPY
+  {
+    imu_rpy_[0] = packet.data[0] * M_PI / 180.0;
+    imu_rpy_[1] = packet.data[1] * M_PI / 180.0;
+    imu_rpy_[2] = packet.data[2] * M_PI / 180.0;
+
+    // Publish RPY
+    if (publish_rpy_)
+    {
+      auto rpy_msg = geometry_msgs::msg::Vector3Stamped();
+      rpy_msg.header.stamp = nh_->now();
+      rpy_msg.header.frame_id = imu_frame_id_;
+      rpy_msg.vector.x = packet.data[0]; // degrees
+      rpy_msg.vector.y = packet.data[1];
+      rpy_msg.vector.z = packet.data[2];
+      rpy_pub_->publish(rpy_msg);
+    }
+  }
+  else if (packet.rid == 0x02) // Gyro
+  {
+    imu_gyro_[0] = packet.data[0] * M_PI / 180.0;
+    imu_gyro_[1] = packet.data[1] * M_PI / 180.0;
+    imu_gyro_[2] = packet.data[2] * M_PI / 180.0;
+  }
+  else if (packet.rid == 0x01) // Accel
+  
+  {
+    imu_accel_[0] = packet.data[0]; // Assuming m/s^2
+    imu_accel_[1] = packet.data[1];
+    imu_accel_[2] = packet.data[2];
+  }
+  else if (packet.rid == 0x04)
+  {
+    /* code */
+    imu_orientation[0] = packet.data[0];
+    imu_orientation[1] = packet.data[1];
+    imu_orientation[2] = packet.data[2];
+    imu_orientation[3] = packet.data[3];
+  }
+  
+  // Publish IMU Data whenever any packet arrives
+  if (publish_imu_data_)
+  {
+    auto imu_msg = sensor_msgs::msg::Imu();
+    imu_msg.header.stamp = nh_->now();
+    imu_msg.header.frame_id = imu_frame_id_;
+
+    // Orientation (Euler to Quaternion ZYX)
+    // double cy = cos(imu_rpy_[2] * 0.5);
+    // double sy = sin(imu_rpy_[2] * 0.5);
+    // double cp = cos(imu_rpy_[1] * 0.5);
+    // double sp = sin(imu_rpy_[1] * 0.5);
+    // double cr = cos(imu_rpy_[0] * 0.5);
+    // double sr = sin(imu_rpy_[0] * 0.5);
+
+    imu_msg.orientation.w = imu_orientation[0];
+    imu_msg.orientation.x = imu_orientation[1];
+    imu_msg.orientation.y = imu_orientation[2];
+    imu_msg.orientation.z = imu_orientation[3];
+
+    // Angular Velocity
+    imu_msg.angular_velocity.x = imu_gyro_[0];
+    imu_msg.angular_velocity.y = imu_gyro_[1];
+    imu_msg.angular_velocity.z = imu_gyro_[2];
+
+    // Linear Acceleration
+    imu_msg.linear_acceleration.x = imu_accel_[0];
+    imu_msg.linear_acceleration.y = imu_accel_[1];
+    imu_msg.linear_acceleration.z = imu_accel_[2];
+
+    imu_pub_->publish(imu_msg);
+  }
 }
 
 void TideHardwareInterface::stopMotors()
@@ -325,6 +635,18 @@ void TideHardwareInterface::stopMotors()
   for (auto& motor : motors_)
   {
     motor->stop();
+    
+    ControlPacket packet;
+    packet.motor_id = static_cast<uint8_t>(motor->config_.tx_id);
+    packet.command = 0;
+
+    std::vector<uint8_t> tx_data(sizeof(ControlPacket));
+    std::memcpy(tx_data.data(), &packet, sizeof(ControlPacket));
+
+    if (serial_device_)
+    {
+      serial_device_->write(tx_data);
+    }
   }
 }
 
@@ -363,7 +685,7 @@ hardware_interface::return_type TideHardwareInterface::read(const rclcpp::Time& 
   return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time& time,
+hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time& /*time*/,
                                                              const rclcpp::Duration& /*period*/)
 {
   if (need_calibration_)
@@ -373,25 +695,23 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
       std::stringstream ss;
       ss << std::left << std::setw(15) << motor->config_.motor_name << "Encoder: " << std::setw(6)
          << motor->measure.ecd;
-      RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "%s", ss.str().c_str());
+      // RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "%s", ss.str().c_str());
     }
     return hardware_interface::return_type::OK;
   }
 
-  for (auto can_device : can_devices_)
+  if (enable_virtual_control_)
   {
-    for (size_t i = 0; i < 3; i++)
-    {
-      can_device->tx_buff[i].fill(0);
-    }
+    return hardware_interface::return_type::OK;
   }
 
+  // Send control packets for each motor
   for (size_t i = 0; i < joint_count; i++)
   {
     double command = 0.0;
     if (!std::isnan(cmd_positions_[i]) && info_.joints[i].command_interfaces[0].name == "position")
     {
-      command = (cmd_positions_[i]);
+      command = cmd_positions_[i];
     }
     else if (!std::isnan(cmd_velocities_[i]) &&
              info_.joints[i].command_interfaces[0].name == "velocity")
@@ -400,43 +720,22 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
     }
 
     auto motor = motors_[i];
-    motor->output = static_cast<int16_t>(
-        std::clamp(command, -30000.0, 30000.0));  // TODO:这里应给不同的电机类型使用不同的限幅
+    motor->output = static_cast<int16_t>(std::clamp(command, -30000.0, 30000.0));
 
-    auto current_time = time;
-    if (motor->check_connection(current_time))
+    ControlPacket packet;
+    packet.motor_id = static_cast<uint8_t>(motor->config_.tx_id);
+    packet.command = motor->output;
+
+    std::vector<uint8_t> tx_data(sizeof(ControlPacket));
+    std::memcpy(tx_data.data(), &packet, sizeof(ControlPacket));
+
+    // ALWAYS send to motor serial device, NEVER to IMU device
+    if (serial_device_)
     {
-      for (auto can_device : can_devices_)
-      {
-        if ((motor->config_.can_bus == can_device->interface) &&
-            motor->config_.motor_type != VIRTUAL_JOINT)
-        {
-          size_t buff_index = (motor->config_.identifier == 0x200) ? 0 :
-                              (motor->config_.identifier == 0x1ff) ? 1 :
-                                                                     2;
-          size_t data_index = (motor->config_.tx_id - 1) * 2;
-
-          can_device->tx_buff[buff_index][data_index] = motor->output >> 8;
-          can_device->tx_buff[buff_index][data_index + 1] = motor->output & 0xff;
-
-          break;
-        }
-      }
+      // serial_device_->write(tx_data);
     }
   }
 
-  for (auto can_device : can_devices_)
-  {
-    for (size_t i = 0; i < 3; i++)
-    {
-      auto id = (i == 0) ? 0x200 : (i == 1) ? 0x1ff : 0x2ff;
-      bool result = sendCanFrame(can_device, can_device->tx_buff[i].data(), 8, id);
-      if (!result)
-      {
-        can_device->tx_buff[i].fill(0);
-      }
-    }
-  }
   return hardware_interface::return_type::OK;
 }
 

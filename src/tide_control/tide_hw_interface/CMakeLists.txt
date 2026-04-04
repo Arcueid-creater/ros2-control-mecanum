@@ -12,13 +12,12 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+
 # Build the hardware interface library
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/tide_motor.cpp
-  src/socket_can/socket_can_common.cpp
-  src/socket_can/socket_can_id.cpp
-  src/socket_can/socket_can_receiver.cpp
-  src/socket_can/socket_can_sender.cpp
   src/tide_hw_interface.cpp
 )
 
