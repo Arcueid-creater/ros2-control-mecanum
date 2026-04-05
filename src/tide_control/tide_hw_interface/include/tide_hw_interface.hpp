@@ -113,8 +113,9 @@ class SerialDevice
 {
 public:
   using ReceiveCallback = std::function<void(const std::vector<uint8_t>&)>;
+  using TickCallback = std::function<void()>;
 
-  SerialDevice(const std::string& port_name, uint32_t baud_rate, ReceiveCallback callback);
+  SerialDevice(const std::string& port_name, uint32_t baud_rate, ReceiveCallback callback, TickCallback tick_callback = nullptr);
   ~SerialDevice();
 
   void write(const std::vector<uint8_t>& data);
@@ -125,6 +126,7 @@ private:
   std::string port_name_;
   uint32_t baud_rate_;
   ReceiveCallback receive_callback_;
+  TickCallback tick_callback_;
 
   std::atomic<bool> running_{false};
   std::thread thread_;
@@ -200,15 +202,6 @@ private:
     uint16_t data_length;  // 数据段长度（字节数）
     // 后面是data_length字节的数据
     // 最后是4字节CRC32
-  } __attribute__((packed));
-
-  struct ImuPacket {
-    uint8_t header[2]; // 0x55, 0xAA
-    uint8_t id;        // 固定为 0xID
-    uint8_t rid;       // 0x01: Accel, 0x02: Gyro, 0x03: RPY, 0x04: Quaternion
-    float data[4];     // 数据（最多4个float，根据rid使用3或4个）
-    uint16_t crc;
-    uint8_t tail;      // 0x0A
   } __attribute__((packed));
 
   std::vector<std::shared_ptr<DJI_Motor>> motors_;

@@ -17,6 +17,9 @@ controller_manager:
     right_shooter_controller:
       type: "tide_shooter_controller/TideShooterController"
 
+    imu_sensor_broadcaster:
+      type: "imu_sensor_broadcaster/IMUSensorBroadcaster"
+
 
 left_gimbal_controller:
   ros__parameters:

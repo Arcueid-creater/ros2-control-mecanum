@@ -104,8 +104,8 @@ uint32_t TideHardwareInterface::calculateCRC32(const uint8_t* data, size_t len)
   return ~crc;
 }
 
-SerialDevice::SerialDevice(const std::string& port_name, uint32_t baud_rate, ReceiveCallback callback)
-  : port_name_(port_name), baud_rate_(baud_rate), receive_callback_(std::move(callback))
+SerialDevice::SerialDevice(const std::string& port_name, uint32_t baud_rate, ReceiveCallback callback, TickCallback tick_callback)
+  : port_name_(port_name), baud_rate_(baud_rate), receive_callback_(std::move(callback)), tick_callback_(std::move(tick_callback))
 {
   fd_ = open(port_name_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
   if (fd_ < 0)
@@ -198,7 +198,7 @@ void SerialDevice::run()
     }
 
     // Check for data to read
-    int ret = poll(fds, 1, 10);
+    int ret = poll(fds, 1, 5);
     if (ret > 0 && (fds[0].revents & POLLIN))
     {
       ssize_t n = ::read(fd_, rx_buffer.data(), rx_buffer.size());
@@ -207,6 +207,12 @@ void SerialDevice::run()
         std::vector<uint8_t> data(rx_buffer.begin(), rx_buffer.begin() + n);
         receive_callback_(data);
       }
+    }
+
+    // New: Tick callback to reuse this thread for other tasks (e.g., spin ROS2 node)
+    if (tick_callback_)
+    {
+      tick_callback_();
     }
   }
 }
@@ -259,8 +265,12 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
     imu_frame_id_ = info_.hardware_parameters.at("imu_frame_id");
   }
 
-  // 方案三：保留节点用于发布RPY，但不需要spin线程
-  nh_ = std::make_shared<rclcpp::Node>("tide_hw_imu_node");
+  // 方案三：保留节点用于发布RPY，但不需要额外线程
+  // 恢复参数服务以支持 Foxglove 调试和其他线程访问
+  rclcpp::NodeOptions node_options;
+  node_options.start_parameter_services(true);
+  node_options.start_parameter_event_publisher(true);
+  nh_ = std::make_shared<rclcpp::Node>("tide_hw_imu_node", node_options);
   
   // 只保留RPY发布器（IMU数据由IMUSensorBroadcaster发布）
   if (publish_rpy_) {
@@ -335,7 +345,13 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
     auto imu_receive_callback = [this](const std::vector<uint8_t>& data) {
       this->parseImuSerialData(data);
     };
-    imu_serial_device_ = std::make_shared<SerialDevice>(imu_serial_port_, imu_baud_rate_, imu_receive_callback);
+    // 复用 IMU 串口线程来 spin ROS2 节点，这样既不需要额外线程，也能支持参数服务和 Foxglove 调试
+    auto imu_tick_callback = [this]() {
+      if (rclcpp::ok()) {
+        rclcpp::spin_some(this->nh_);
+      }
+    };
+    imu_serial_device_ = std::make_shared<SerialDevice>(imu_serial_port_, imu_baud_rate_, imu_receive_callback, imu_tick_callback);
   }
   catch (const std::exception& e)
   {
@@ -643,31 +659,58 @@ void TideHardwareInterface::parseImuSerialData(const std::vector<uint8_t>& data)
 {
   imu_rx_buffer_.insert(imu_rx_buffer_.end(), data.begin(), data.end());
 
-  while (imu_rx_buffer_.size() >= sizeof(ImuPacket))
+  while (imu_rx_buffer_.size() >= 4) // At least Header(2), ID(1), rid(1)
   {
     if (imu_rx_buffer_[0] == 0x55 && imu_rx_buffer_[1] == 0xAA)
     {
-      ImuPacket packet;
-      std::memcpy(&packet, imu_rx_buffer_.data(), sizeof(ImuPacket));
-      
-      if (packet.tail == 0x0A)
+      uint8_t rid = imu_rx_buffer_[3];
+      size_t packet_len = 0;
+      size_t crc_data_len = 0;
+
+      if (rid >= 0x01 && rid <= 0x03) // Accel, Gyro, RPY
       {
-        uint16_t crc_calc = calculateCRC16(imu_rx_buffer_.data(), 16);
-        if (crc_calc == packet.crc)
+        packet_len = 19;
+        crc_data_len = 16;
+      }
+      else if (rid == 0x04) // Quaternion
+      {
+        packet_len = 23;
+        crc_data_len = 20;
+      }
+      else
+      {
+        // Invalid rid, drop header and continue
+        imu_rx_buffer_.erase(imu_rx_buffer_.begin(), imu_rx_buffer_.begin() + 2);
+        continue;
+      }
+
+      if (imu_rx_buffer_.size() < packet_len)
+      {
+        break; // Wait for more data
+      }
+
+      // Check tail
+      if (imu_rx_buffer_[packet_len - 1] == 0x0A)
+      {
+        uint16_t received_crc;
+        std::memcpy(&received_crc, imu_rx_buffer_.data() + packet_len - 3, sizeof(uint16_t));
+
+        uint16_t crc_calc = calculateCRC16(imu_rx_buffer_.data(), crc_data_len);
+        if (crc_calc == received_crc)
         {
           parseImuData(imu_rx_buffer_.data());
         }
         else
         {
           // Try without header (skip 0x55 0xAA)
-          uint16_t crc_calc_no_hdr = calculateCRC16(imu_rx_buffer_.data() + 2, 14);
-          if (crc_calc_no_hdr == packet.crc)
+          uint16_t crc_calc_no_hdr = calculateCRC16(imu_rx_buffer_.data() + 2, crc_data_len - 2);
+          if (crc_calc_no_hdr == received_crc)
           {
             parseImuData(imu_rx_buffer_.data());
           }
         }
       }
-      imu_rx_buffer_.erase(imu_rx_buffer_.begin(), imu_rx_buffer_.begin() + sizeof(ImuPacket));
+      imu_rx_buffer_.erase(imu_rx_buffer_.begin(), imu_rx_buffer_.begin() + packet_len);
     }
     else
     {
@@ -678,38 +721,42 @@ void TideHardwareInterface::parseImuSerialData(const std::vector<uint8_t>& data)
 
 void TideHardwareInterface::parseImuData(const uint8_t* frame)
 {
-  ImuPacket packet;
-  std::memcpy(&packet, frame, sizeof(ImuPacket));
-
-  // 方案三：只更新内存变量，不在回调中发布
-  // 发布逻辑移到 read() 函数中
-  // 使用互斥锁保护IMU数据
+  uint8_t rid = frame[3];
+  
   std::lock_guard<std::mutex> lock(imu_mutex_);
   
-  if (packet.rid == 0x01) // Accel (加速度)
+  if (rid == 0x01) // Accel (加速度)
   {
-    imu_accel_[0] = packet.data[0]; // m/s^2
-    imu_accel_[1] = packet.data[1];
-    imu_accel_[2] = packet.data[2];
+    float accel[3];
+    std::memcpy(accel, frame + 4, 3 * sizeof(float));
+    imu_accel_[0] = static_cast<double>(accel[0]); // m/s^2
+    imu_accel_[1] = static_cast<double>(accel[1]);
+    imu_accel_[2] = static_cast<double>(accel[2]);
   }
-  else if (packet.rid == 0x02) // Gyro (角速度)
+  else if (rid == 0x02) // Gyro (角速度)
   {
-    imu_gyro_[0] = packet.data[0] * M_PI / 180.0; // 转换为 rad/s
-    imu_gyro_[1] = packet.data[1] * M_PI / 180.0;
-    imu_gyro_[2] = packet.data[2] * M_PI / 180.0;
+    float gyro[3];
+    std::memcpy(gyro, frame + 4, 3 * sizeof(float));
+    imu_gyro_[0] = static_cast<double>(gyro[0]) * M_PI / 180.0; // 转换为 rad/s
+    imu_gyro_[1] = static_cast<double>(gyro[1]) * M_PI / 180.0;
+    imu_gyro_[2] = static_cast<double>(gyro[2]) * M_PI / 180.0;
   }
-  else if (packet.rid == 0x03) // RPY (姿态角)
+  else if (rid == 0x03) // RPY (姿态角)
   {
-    imu_rpy_[0] = packet.data[0] * M_PI / 180.0; // 转换为弧度
-    imu_rpy_[1] = packet.data[1] * M_PI / 180.0;
-    imu_rpy_[2] = packet.data[2] * M_PI / 180.0;
+    float rpy[3];
+    std::memcpy(rpy, frame + 4, 3 * sizeof(float));
+    imu_rpy_[0] = static_cast<double>(rpy[0]) * M_PI / 180.0; // 转换为弧度
+    imu_rpy_[1] = static_cast<double>(rpy[1]) * M_PI / 180.0;
+    imu_rpy_[2] = static_cast<double>(rpy[2]) * M_PI / 180.0;
   }
-  else if (packet.rid == 0x04) // Quaternion (四元数)
+  else if (rid == 0x04) // Quaternion (四元数)
   {
-    imu_orientation[0] = packet.data[0]; // W
-    imu_orientation[1] = packet.data[1]; // X
-    imu_orientation[2] = packet.data[2]; // Y
-    imu_orientation[3] = packet.data[3]; // Z
+    float quat[4];
+    std::memcpy(quat, frame + 4, 4 * sizeof(float));
+    imu_orientation[0] = static_cast<double>(quat[0]); // W
+    imu_orientation[1] = static_cast<double>(quat[1]); // X
+    imu_orientation[2] = static_cast<double>(quat[2]); // Y
+    imu_orientation[3] = static_cast<double>(quat[3]); // Z
   }
 }
 
