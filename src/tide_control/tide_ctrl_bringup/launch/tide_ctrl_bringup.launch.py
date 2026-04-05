@@ -13,6 +13,7 @@ from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition, UnlessCondition
+from launch_ros.parameter_descriptions import ParameterValue
 
 sys.path.append(
     os.path.join(get_package_share_directory("tide_ctrl_bringup"), "launch")
@@ -64,7 +65,10 @@ def generate_launch_description():
         ]
     )
 
-    robot_description = Command([FindExecutable(name="xacro"), " ", xacro_file])
+    # 生成 URDF 命令
+    robot_description_content = Command([FindExecutable(name="xacro"), " ", xacro_file])
+    # 显式声明为字符串类型，防止 Launch 系统误解析为 YAML
+    robot_description = {'robot_description': ParameterValue(robot_description_content, value_type=str)}
 
     tide_gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -109,20 +113,20 @@ def generate_launch_description():
         name="robot_state_publisher",
         output="screen",
         parameters=[
-            {"use_sim_time": use_sim_time, "robot_description": robot_description}
-        ],
+        {"use_sim_time": use_sim_time},
+        robot_description  # 这里直接传入上面定义好的字典
+    ],
     )
 
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         parameters=[
-            {
-                "use_sim_time": use_sim_time,
-                "robot_description": robot_description,
-            },
+            {"use_sim_time": use_sim_time},
+            robot_description,  # 这里直接传入
             controller_config,
         ],
+
         output="screen",
         condition=UnlessCondition(sim_mode),
     )

@@ -549,9 +549,7 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
             }
           }
           // 使用THROTTLE限流，每1000ms最多打印一次
-          RCLCPP_INFO_THROTTLE(rclcpp::get_logger("TideHardwareInterface"), 
-                              rclcpp::Clock(), 1000,
-                              "%s", ss.str().c_str());
+          // RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "%s", ss.str().c_str());
         }
         
         // 移除已处理的数据包
@@ -626,10 +624,10 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
       else
       {
         // CRC校验失败，丢弃帧头，继续查找下一个有效包
-        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("TideHardwareInterface"), 
-                            rclcpp::Clock(), 1000,
-                            "Motor CRC32 mismatch: received=0x%08X, calculated=0x%08X", 
-                            received_crc, calculated_crc);
+        // RCLCPP_WARN_THROTTLE(rclcpp::get_logger("TideHardwareInterface"), 
+        //                     rclcpp::Clock(),1000,
+        //                     "Motor CRC32 mismatch: received=0x%08X, calculated=0x%08X", 
+        //                     received_crc, calculated_crc);
         motor_rx_buffer_.erase(motor_rx_buffer_.begin(), motor_rx_buffer_.begin() + 2);
       }
     }
