@@ -1,0 +1,477 @@
+/**
+ * @file trans_task.c
+ * @brief 上下位机通讯实现 - 新协议（0xFF 0xAA + CRC32）
+ * @date 2025-02-08
+ */
+#include <stdio.h>
+#include <string.h>
+#include "trans_task.h"
+#include "usbd_cdc_if.h"
+#include "cmsis_os.h"
+#include "rm_module.h"
+#include "gimbal_task.h"
+
+#define HEART_BEAT 500 // ms
+
+/* ==================== 线程间通信相关 ==================== */
+
+// 发布
+MCN_DECLARE(transmission_fdb_topic);
+static struct trans_fdb_msg trans_fdb_data;
+
+// 订阅
+MCN_DECLARE(ins_topic);
+static McnNode_t ins_topic_node;
+static struct ins_msg ins;
+
+MCN_DECLARE(chassis_cmd);
+static McnNode_t chassis_cmd_node;
+static struct chassis_cmd_msg chass_cmd;
+
+MCN_DECLARE(gimbal_cmd);
+static McnNode_t gimbal_cmd_node;
+static struct gimbal_cmd_msg gimbal_cmd;
+
+MCN_DECLARE(gimbal_fdb_topic);
+static McnNode_t gimbal_fdb_node;
+static struct gimbal_fdb_msg gimbal_fdb;
+
+MCN_DECLARE(gimbal_ins_topic);
+static McnNode_t gimbal_ins_node;
+static struct dm_imu_t gim_ins;
+
+// 内部函数声明
+static void trans_pub_push(void);
+static void trans_sub_init(void);
+static void trans_sub_pull(void);
+
+/* ==================== 全局变量 ==================== */
+static uint32_t heart_dt;
+static float trans_dt;
+static float trans_start;
+static float yaw_filtered = 0;
+static float pitch_filtered = 0;
+static float yaw_obs = 0;
+TeamColor team_color = UNKNOWN;
+
+/* ==================== 接收数据缓冲区（新增）==================== */
+// 存储接收到的原始数据
+static uint8_t received_data_buffer[MOTOR_MAX_DATA_LEN];
+static uint16_t received_data_length = 0;
+static uint8_t data_ready_flag = 0;  // 数据就绪标志
+
+/**
+ * @brief 获取接收到的数据
+ * @param data 输出缓冲区
+ * @param length 输出数据长度
+ * @return 1=有新数据, 0=无新数据
+ */
+uint8_t get_received_data(uint8_t *data, uint16_t *length)
+{
+    if (data_ready_flag)
+    {
+        memcpy(data, received_data_buffer, received_data_length);
+        *length = received_data_length;
+        data_ready_flag = 0;  // 清除标志
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief 检查是否有新数据
+ */
+uint8_t has_new_data(void)
+{
+    return data_ready_flag;
+}
+
+/* ==================== CRC32查找表 ==================== */
+static const uint32_t CRC32_TABLE[256] = {
+    0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3,
+    0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988, 0x09B64C2B, 0x7EB17CBD, 0xE7B82D07, 0x90BF1D91,
+    0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7,
+    0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5,
+    0x3B6E20C8, 0x4C69105E, 0xD56041E4, 0xA2677172, 0x3C03E4D1, 0x4B04D447, 0xD20D85FD, 0xA50AB56B,
+    0x35B5A8FA, 0x42B2986C, 0xDBBBC9D6, 0xACBCF940, 0x32D86CE3, 0x45DF5C75, 0xDCD60DCF, 0xABD13D59,
+    0x26D930AC, 0x51DE003A, 0xC8D75180, 0xBFD06116, 0x21B4F4B5, 0x56B3C423, 0xCFBA9599, 0xB8BDA50F,
+    0x2802B89E, 0x5F058808, 0xC60CD9B2, 0xB10BE924, 0x2F6F7C87, 0x58684C11, 0xC1611DAB, 0xB6662D3D,
+    0x76DC4190, 0x01DB7106, 0x98D220BC, 0xEFD5102A, 0x71B18589, 0x06B6B51F, 0x9FBFE4A5, 0xE8B8D433,
+    0x7807C9A2, 0x0F00F934, 0x9609A88E, 0xE10E9818, 0x7F6A0DBB, 0x086D3D2D, 0x91646C97, 0xE6635C01,
+    0x6B6B51F4, 0x1C6C6162, 0x856530D8, 0xF262004E, 0x6C0695ED, 0x1B01A57B, 0x8208F4C1, 0xF50FC457,
+    0x65B0D9C6, 0x12B7E950, 0x8BBEB8EA, 0xFCB9887C, 0x62DD1DDF, 0x15DA2D49, 0x8CD37CF3, 0xFBD44C65,
+    0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB,
+    0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7CC9,
+    0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F,
+    0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81, 0xB7BD5C3B, 0xC0BA6CAD,
+    0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A, 0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683,
+    0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8, 0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1,
+    0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB, 0x196C3671, 0x6E6B06E7,
+    0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5,
+    0xD6D6A3E8, 0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B,
+    0xD80D2BDA, 0xAF0A1B4C, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF, 0x4669BE79,
+    0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236, 0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F,
+    0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D,
+    0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713,
+    0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21,
+    0x86D3D2D4, 0xF1D4E242, 0x68DDB3F8, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777,
+    0x88085AE6, 0xFF0F6A70, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45,
+    0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7, 0x4969474D, 0x3E6E77DB,
+    0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9,
+    0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD70693, 0x54DE5729, 0x23D967BF,
+    0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
+};
+
+/**
+ * @brief 计算CRC32
+ */
+static uint32_t calculate_crc32(const uint8_t* data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++)
+    {
+        uint8_t index = (crc ^ data[i]) & 0xFF;
+        crc = (crc >> 8) ^ CRC32_TABLE[index];
+    }
+    return ~crc;
+}
+
+/* ==================== 接收相关 ==================== */
+static uint8_t rx_buffer[512];
+static uint16_t rx_index = 0;
+static struct trans_fdb_msg trans_fdb_data;
+
+typedef enum {
+    WAIT_FOR_HEADER1,
+    WAIT_FOR_HEADER2,
+    RECEIVING_LENGTH,
+    RECEIVING_DATA
+} RxState_e;
+
+static RxState_e rx_state = WAIT_FOR_HEADER1;
+static uint16_t expected_data_length = 0;
+
+/* ==================== 发送函数 ==================== */
+
+/**
+ * @brief 通用发送函数（内部使用）
+ */
+static void send_packet(uint8_t *data, uint16_t length)
+{
+    static uint8_t tx_buffer[512];
+    size_t offset = 0;
+    
+    // 1. 帧头
+    tx_buffer[offset++] = MOTOR_FRAME_HEADER_1;
+    tx_buffer[offset++] = MOTOR_FRAME_HEADER_2;
+    
+    // 2. 数据长度
+    memcpy(tx_buffer + offset, &length, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    
+    // 3. 数据
+    memcpy(tx_buffer + offset, data, length);
+    offset += length;
+    
+    // 4. 计算CRC32（从帧头到数据结束）
+    uint32_t crc = calculate_crc32(tx_buffer, offset);
+    memcpy(tx_buffer + offset, &crc, sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    
+    // 5. 发送
+    CDC_Transmit_HS(tx_buffer, offset);
+}
+
+/**
+ * @brief 发送单个电机数据
+ */
+void send_single_motor(uint8_t motor_id, float position, float velocity, 
+                       float current, float temperature)
+{
+    uint8_t data[17];  // 1 + 4*4 = 17字节
+    size_t offset = 0;
+    
+    // 电机ID
+    data[offset++] = motor_id;
+    
+    // 位置
+    memcpy(data + offset, &position, sizeof(float));
+    offset += sizeof(float);
+    
+    // 速度
+    memcpy(data + offset, &velocity, sizeof(float));
+    offset += sizeof(float);
+    
+    // 电流
+    memcpy(data + offset, &current, sizeof(float));
+    offset += sizeof(float);
+    
+    // 温度
+    memcpy(data + offset, &temperature, sizeof(float));
+    offset += sizeof(float);
+    
+    send_packet(data, offset);
+}
+
+/**
+ * @brief 发送多个电机数据（批量）
+ */
+void send_multiple_motors(MotorData_t *motors, uint8_t count)
+{
+    uint8_t data[256];
+    size_t offset = 0;
+    
+    // 电机数量
+    data[offset++] = count;
+    
+    // 每个电机的数据
+    for (uint8_t i = 0; i < count; i++)
+    {
+        data[offset++] = motors[i].motor_id;
+        memcpy(data + offset, &motors[i].position, sizeof(float));
+        offset += sizeof(float);
+        memcpy(data + offset, &motors[i].velocity, sizeof(float));
+        offset += sizeof(float);
+        memcpy(data + offset, &motors[i].current, sizeof(float));
+        offset += sizeof(float);
+        memcpy(data + offset, &motors[i].temperature, sizeof(float));
+        offset += sizeof(float);
+    }
+    
+    send_packet(data, offset);
+}
+
+/**
+ * @brief 发送自定义数据
+ */
+void send_custom_data(uint8_t *data, uint16_t length)
+{
+    send_packet(data, length);
+}
+
+/**
+ * @brief 发送浮点数数组（最简单）
+ */
+void send_float_array(float *floats, uint8_t count)
+{
+    uint8_t data[256];
+    size_t offset = 0;
+    
+    for (uint8_t i = 0; i < count; i++)
+    {
+        memcpy(data + offset, &floats[i], sizeof(float));
+        offset += sizeof(float);
+    }
+    
+    send_packet(data, offset);
+}
+
+/* ==================== 接收函数 ==================== */
+
+/**
+ * @brief USB数据接收处理
+ */
+void process_usb_data(uint8_t* Buf, uint32_t *Len)
+{
+    for (uint32_t i = 0; i < *Len; i++)
+    {
+        uint8_t byte = Buf[i];
+        
+        switch (rx_state)
+        {
+            case WAIT_FOR_HEADER1:
+                if (byte == MOTOR_FRAME_HEADER_1)
+                {
+                    rx_index = 0;
+                    rx_buffer[rx_index++] = byte;
+                    rx_state = WAIT_FOR_HEADER2;
+                }
+                break;
+                
+            case WAIT_FOR_HEADER2:
+                if (byte == MOTOR_FRAME_HEADER_2)
+                {
+                    rx_buffer[rx_index++] = byte;
+                    rx_state = RECEIVING_LENGTH;
+                }
+                else
+                {
+                    rx_state = WAIT_FOR_HEADER1;
+                }
+                break;
+                
+            case RECEIVING_LENGTH:
+                rx_buffer[rx_index++] = byte;
+                if (rx_index >= 4)  // 帧头(2) + 长度(2)
+                {
+                    memcpy(&expected_data_length, rx_buffer + 2, sizeof(uint16_t));
+                    rx_state = RECEIVING_DATA;
+                }
+                break;
+                
+            case RECEIVING_DATA:
+                rx_buffer[rx_index++] = byte;
+                
+                // 检查是否接收完整：帧头(2) + 长度(2) + 数据(N) + CRC32(4)
+                if (rx_index >= 4 + expected_data_length + 4)
+                {
+                    // 验证CRC32
+                    size_t crc_offset = 4 + expected_data_length;
+                    uint32_t received_crc;
+                    memcpy(&received_crc, rx_buffer + crc_offset, sizeof(uint32_t));
+                    
+                    uint32_t calculated_crc = calculate_crc32(rx_buffer, crc_offset);
+                    
+                    if (received_crc == calculated_crc)
+                    {
+                        // CRC校验通过，解析数据
+                        uint8_t *data = rx_buffer + 4;  // 跳过帧头和长度
+                        
+                        // ========== 保存接收到的数据（新增）==========
+                        // 复制数据到全局缓冲区供外部使用
+                        memcpy(received_data_buffer, data, expected_data_length);
+                        received_data_length = expected_data_length;
+                        data_ready_flag = 1;  // 设置数据就绪标志
+                        
+                        // ========== 示例：解析数据 ==========
+                        // 你可以在这里添加自己的解析逻辑
+                        
+                        // 示例1：如果是单个电机数据（17字节）
+                        if (expected_data_length >= 17)
+                        {
+                            size_t offset = 0;
+                            uint8_t motor_id = data[offset++];
+                            
+                            float position, velocity, current, temperature;
+                            memcpy(&position, data + offset, sizeof(float)); offset += sizeof(float);
+                            memcpy(&velocity, data + offset, sizeof(float)); offset += sizeof(float);
+                            memcpy(&current, data + offset, sizeof(float)); offset += sizeof(float);
+                            memcpy(&temperature, data + offset, sizeof(float)); offset += sizeof(float);
+                            
+                            // 存储到反馈数据
+                            trans_fdb_data.yaw = position;
+                            trans_fdb_data.pitch = velocity;
+                            trans_fdb_data.roll = current;
+                        }
+                    }
+                    
+                    // 重置状态
+                    rx_state = WAIT_FOR_HEADER1;
+                    rx_index = 0;
+                }
+                break;
+        }
+    }
+}
+
+/**
+ * @brief 获取接收到的数据
+ */
+struct trans_fdb_msg* get_trans_fdb(void)
+{
+    return &trans_fdb_data;
+}
+
+/* ==================== 任务函数 ==================== */
+
+void trans_task_init(void)
+{
+    memset(&trans_fdb_data, 0, sizeof(trans_fdb_data));
+    rx_state = WAIT_FOR_HEADER1;
+    rx_index = 0;
+    
+    // 初始化订阅
+    trans_sub_init();
+    
+    heart_dt = dwt_get_time_ms();
+}
+
+void trans_control_task(void)
+{
+    trans_start = dwt_get_time_ms();
+    
+    // 订阅数据更新
+    trans_sub_pull();
+    
+    /* ==================== 心跳检测 ==================== */
+    if ((dwt_get_time_ms() - heart_dt) >= HEART_BEAT)
+    {
+        heart_dt = dwt_get_time_ms();
+        // 可以在这里发送心跳包
+    }
+    
+    /* ==================== 发送数据示例 ==================== */
+    
+    // 方式1：发送云台姿态数据（使用你原来的数据）
+    yaw_obs = gimbal_fdb.yaw_offset_angle - gim_ins.yaw;
+    float data[] = {
+        ins.pitch,
+        yaw_obs,
+        0.0f,  // openfire
+        (float)team_color
+    };
+    send_float_array(data, 4);
+    
+    // 方式2：发送单个电机数据
+    // send_single_motor(1, gimbal_fdb.yaw_offset_angle, gim_ins.yaw, 0, 0);
+    
+    // 方式3：发送多个电机数据
+    // MotorData_t motors[3];
+    // motors[0].motor_id = 1;
+    // motors[0].position = gimbal_fdb.yaw_offset_angle;
+    // motors[0].velocity = gim_ins.yaw;
+    // motors[0].current = 0;
+    // motors[0].temperature = 0;
+    // // ... 填充其他电机
+    // send_multiple_motors(motors, 3);
+    
+    /* ==================== 发布数据更新 ==================== */
+    trans_pub_push();
+    
+    /* ==================== 性能监测 ==================== */
+    trans_dt = dwt_get_time_ms() - trans_start;
+    if (trans_dt > 1)
+    {
+        // LOGINFO("Transmission Task is being DELAY! dt = [%f]\r\n", &trans_dt);
+    }
+}
+
+/* ==================== 消息订阅发布 ==================== */
+
+static void trans_pub_push(void)
+{
+    mcn_publish(MCN_HUB(transmission_fdb_topic), &trans_fdb_data);
+}
+
+static void trans_sub_init(void)
+{
+    ins_topic_node = mcn_subscribe(MCN_HUB(ins_topic), NULL, NULL);
+    chassis_cmd_node = mcn_subscribe(MCN_HUB(chassis_cmd), NULL, NULL);
+    gimbal_cmd_node = mcn_subscribe(MCN_HUB(gimbal_cmd), NULL, NULL);
+    gimbal_fdb_node = mcn_subscribe(MCN_HUB(gimbal_fdb_topic), NULL, NULL);
+    gimbal_ins_node = mcn_subscribe(MCN_HUB(gimbal_ins_topic), NULL, NULL);
+}
+
+static void trans_sub_pull(void)
+{
+    if (mcn_poll(ins_topic_node))
+    {
+        mcn_copy(MCN_HUB(ins_topic), ins_topic_node, &ins);
+    }
+    if (mcn_poll(chassis_cmd_node))
+    {
+        mcn_copy(MCN_HUB(chassis_cmd), chassis_cmd_node, &chass_cmd);
+    }
+    if (mcn_poll(gimbal_cmd_node))
+    {
+        mcn_copy(MCN_HUB(gimbal_cmd), gimbal_cmd_node, &gimbal_cmd);
+    }
+    if (mcn_poll(gimbal_fdb_node))
+    {
+        mcn_copy(MCN_HUB(gimbal_fdb_topic), gimbal_fdb_node, &gimbal_fdb);
+    }
+    if (mcn_poll(gimbal_ins_node))
+    {
+        mcn_copy(MCN_HUB(gimbal_ins_topic), gimbal_ins_node, &gim_ins);
+    }
+}

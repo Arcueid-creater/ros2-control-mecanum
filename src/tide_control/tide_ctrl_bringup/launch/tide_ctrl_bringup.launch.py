@@ -95,6 +95,14 @@ def generate_launch_description():
         ]
     )
 
+    imu_broadcaster_config = PathJoinSubstitution(
+        [
+            ctrl_bringup_pkg_dir,
+            "config",
+            "imu_sensor_broadcaster.yaml",
+        ]
+    )
+
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -121,6 +129,18 @@ def generate_launch_description():
 
     controllers = choose_controllers(robot_type)
 
+    imu_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "imu_sensor_broadcaster",
+            "--param-file",
+            imu_broadcaster_config,
+        ],
+        output="both",
+        condition=UnlessCondition(sim_mode),
+    )
+
     foxglove_node = Node(
         package="foxglove_bridge",
         executable="foxglove_bridge",
@@ -142,6 +162,7 @@ def generate_launch_description():
             robot_state_publisher_node,
             control_node,
             controllers,
+            imu_broadcaster_spawner,
             tide_gazebo,
             foxglove_node,
         ]
