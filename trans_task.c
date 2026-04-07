@@ -1,20 +1,15 @@
-/**
- * @file trans_task.c
- * @brief 上下位机通讯实现 - 新协议（0xFF 0xAA + CRC32）
- * @date 2025-02-08
- */
 #include <stdio.h>
-#include <string.h>
-#include "trans_task.h"
-#include "usbd_cdc_if.h"
 #include "cmsis_os.h"
 #include "rm_module.h"
+#include "usbd_cdc_if.h"
+#include "trans_task.h"
 #include "gimbal_task.h"
+#include "rc_dbus.h"
 
 #define HEART_BEAT 500 // ms
 
 /* ==================== 线程间通信相关 ==================== */
-
+static rc_dbus_obj_t *rc_now, *rc_last;
 // 发布
 MCN_DECLARE(transmission_fdb_topic);
 static struct trans_fdb_msg trans_fdb_data;
@@ -44,6 +39,8 @@ static struct dm_imu_t gim_ins;
 static void trans_pub_push(void);
 static void trans_sub_init(void);
 static void trans_sub_pull(void);
+
+static void send_rc_dbus_data(const rc_dbus_obj_t* rc);
 
 /* ==================== 全局变量 ==================== */
 static uint32_t heart_dt;
@@ -139,7 +136,6 @@ static uint32_t calculate_crc32(const uint8_t* data, size_t len)
 /* ==================== 接收相关 ==================== */
 static uint8_t rx_buffer[512];
 static uint16_t rx_index = 0;
-static struct trans_fdb_msg trans_fdb_data;
 
 typedef enum {
     WAIT_FOR_HEADER1,
@@ -150,6 +146,44 @@ typedef enum {
 
 static RxState_e rx_state = WAIT_FOR_HEADER1;
 static uint16_t expected_data_length = 0;
+
+/* ==================== 上发数据类型定义 ==================== */
+
+typedef enum
+{
+    TRANS_MSG_ID_RC_DBUS = 0x10,
+} trans_msg_id_e;
+
+static void send_rc_dbus_data(const rc_dbus_obj_t* rc)
+{
+    uint8_t data[32];
+    size_t offset = 0;
+
+    if (rc == NULL)
+    {
+        return;
+    }
+
+    data[offset++] = (uint8_t)TRANS_MSG_ID_RC_DBUS;
+
+    memcpy(data + offset, &rc->ch1, sizeof(rc->ch1)); offset += sizeof(rc->ch1);
+    memcpy(data + offset, &rc->ch2, sizeof(rc->ch2)); offset += sizeof(rc->ch2);
+    memcpy(data + offset, &rc->ch3, sizeof(rc->ch3)); offset += sizeof(rc->ch3);
+    memcpy(data + offset, &rc->ch4, sizeof(rc->ch4)); offset += sizeof(rc->ch4);
+
+    data[offset++] = rc->sw1;
+    data[offset++] = rc->sw2;
+
+    memcpy(data + offset, &rc->mouse.x, sizeof(rc->mouse.x)); offset += sizeof(rc->mouse.x);
+    memcpy(data + offset, &rc->mouse.y, sizeof(rc->mouse.y)); offset += sizeof(rc->mouse.y);
+    data[offset++] = rc->mouse.l;
+    data[offset++] = rc->mouse.r;
+
+    memcpy(data + offset, &rc->kb.key_code, sizeof(rc->kb.key_code)); offset += sizeof(rc->kb.key_code);
+    memcpy(data + offset, &rc->wheel, sizeof(rc->wheel)); offset += sizeof(rc->wheel);
+
+    send_custom_data(data, (uint16_t)offset);
+}
 
 /* ==================== 发送函数 ==================== */
 
@@ -213,33 +247,6 @@ void send_single_motor(uint8_t motor_id, float position, float velocity,
     send_packet(data, offset);
 }
 
-/**
- * @brief 发送多个电机数据（批量）
- */
-void send_multiple_motors(MotorData_t *motors, uint8_t count)
-{
-    uint8_t data[256];
-    size_t offset = 0;
-    
-    // 电机数量
-    data[offset++] = count;
-    
-    // 每个电机的数据
-    for (uint8_t i = 0; i < count; i++)
-    {
-        data[offset++] = motors[i].motor_id;
-        memcpy(data + offset, &motors[i].position, sizeof(float));
-        offset += sizeof(float);
-        memcpy(data + offset, &motors[i].velocity, sizeof(float));
-        offset += sizeof(float);
-        memcpy(data + offset, &motors[i].current, sizeof(float));
-        offset += sizeof(float);
-        memcpy(data + offset, &motors[i].temperature, sizeof(float));
-        offset += sizeof(float);
-    }
-    
-    send_packet(data, offset);
-}
 
 /**
  * @brief 发送自定义数据
@@ -379,10 +386,10 @@ void trans_task_init(void)
     memset(&trans_fdb_data, 0, sizeof(trans_fdb_data));
     rx_state = WAIT_FOR_HEADER1;
     rx_index = 0;
-    
+    rc_now = dbus_rc_init();
     // 初始化订阅
     trans_sub_init();
-    
+    rc_last = (rc_now + 1);   // rc_obj[0]:当前数据NOW,[1]:上一次的数据LAST
     heart_dt = dwt_get_time_ms();
 }
 
@@ -401,16 +408,9 @@ void trans_control_task(void)
     }
     
     /* ==================== 发送数据示例 ==================== */
-    
-    // 方式1：发送云台姿态数据（使用你原来的数据）
-    yaw_obs = gimbal_fdb.yaw_offset_angle - gim_ins.yaw;
-    float data[] = {
-        ins.pitch,
-        yaw_obs,
-        0.0f,  // openfire
-        (float)team_color
-    };
-    send_float_array(data, 4);
+
+    /* 上发：已接收到的遥控器数据（DBUS decode 后的 rc_now） */
+    send_rc_dbus_data(rc_now);
     
     // 方式2：发送单个电机数据
     // send_single_motor(1, gimbal_fdb.yaw_offset_angle, gim_ins.yaw, 0, 0);

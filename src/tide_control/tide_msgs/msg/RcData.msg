@@ -1,0 +1,12 @@
+int16 ch1
+int16 ch2
+int16_t ch3
+int16_t ch4
+uint8 sw1
+uint8 sw2
+int16 mouse_x
+int16 mouse_y
+uint8 mouse_l
+uint8 mouse_r
+uint16 key_code
+int16 wheel

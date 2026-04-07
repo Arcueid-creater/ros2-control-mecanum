@@ -26,16 +26,7 @@ typedef struct {
     uint32_t crc32;         // CRC32校验（发送时自动计算）
 } __attribute__((packed)) MotorPacket_t;
 
-/**
- * @brief 电机数据结构（便捷使用）
- */
-typedef struct {
-    uint8_t motor_id;
-    float position;
-    float velocity;
-    float current;
-    float temperature;
-} __attribute__((packed)) MotorData_t;
+
 
 /* ==================== 颜色定义 ==================== */
 typedef enum {
@@ -72,7 +63,7 @@ void send_single_motor(uint8_t motor_id, float position, float velocity,
  * @param motors 电机数据数组
  * @param count 电机数量
  */
-void send_multiple_motors(MotorData_t *motors, uint8_t count);
+
 
 /**
  * @brief 发送自定义数据
@@ -114,62 +105,26 @@ uint8_t has_new_data(void);
 
 /* ==================== 线程间通信相关 ==================== */
 
-/**
- * @brief 传输反馈消息结构体
- */
-struct trans_fdb_msg {
-    float yaw;
-    float pitch;
-    float roll;
-    float yaw_filtered;
-    float pitch_filtered;
-    uint8_t heartbeat;
-};
 
 /**
  * @brief INS消息结构体（根据你的系统定义）
  */
-struct ins_msg {
-    float roll;
-    float pitch;
-    float yaw;
-    // ... 其他字段
-};
 
 /**
  * @brief 底盘命令消息结构体
  */
-struct chassis_cmd_msg {
-    // 根据你的系统定义
-    uint8_t ctrl_mode;
-    // ...
-};
+
 
 /**
  * @brief 云台命令消息结构体
  */
-struct gimbal_cmd_msg {
-    uint8_t ctrl_mode;
-    // ...
-};
 
 /**
  * @brief 云台反馈消息结构体
- */
-struct gimbal_fdb_msg {
-    float yaw_offset_angle;
-    float yaw_relative_angle;
-    // ...
-};
 
 /**
  * @brief 云台IMU消息结构体
  */
-struct dm_imu_t {
-    float roll;
-    float pitch;
-    float yaw;
-    // ...
-};
+
 
 #endif // TRANS_TASK_H

@@ -277,6 +277,8 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
     rpy_pub_ = nh_->create_publisher<geometry_msgs::msg::Vector3Stamped>("imu/rpy", 10);
   }
 
+  rc_dbus_pub_ = nh_->create_publisher<tide_msgs::msg::RcData>("rc/dbus", 10);
+
   for (const auto& joint : info_.joints)
   {
     Motor_Config_t config;
@@ -545,8 +547,69 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
         motor_data_buffer_.insert(motor_data_buffer_.end(),
                                   motor_rx_buffer_.begin() + 4,  // 跳过帧头(2)和长度(2)
                                   motor_rx_buffer_.begin() + crc_offset); // 到CRC32之前
-        // TODO: 在这里添加你自己的数据解析逻辑
-        // motor_data_buffer_ 现在包含了纯净的数据，可以按照你的协议解析
+
+        // ====== 协议分发：根据 msg_id 解析不同数据 ======
+        // 下位机遥控器DBUS上发格式：
+        // [msg_id=0x10]
+        // [ch1][ch2][ch3][ch4] (int16)
+        // [sw1][sw2] (uint8)
+        // [mouse.x][mouse.y] (int16)
+        // [mouse.l][mouse.r] (uint8)
+        // [kb.key_code] (uint16)
+        // [wheel] (int16)
+        if (motor_data_buffer_.size() >= 1 && motor_data_buffer_[0] == 0x10)
+        {
+          // payload length should be 19 bytes for RC_DBUS
+          if (motor_data_buffer_.size() >= 19)
+          {
+            size_t off = 1;
+
+            int16_t ch1, ch2, ch3, ch4;
+            uint8_t sw1, sw2;
+            int16_t mouse_x, mouse_y;
+            uint8_t mouse_l, mouse_r;
+            uint16_t key_code;
+            int16_t wheel;
+
+            std::memcpy(&ch1, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+            std::memcpy(&ch2, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+            std::memcpy(&ch3, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+            std::memcpy(&ch4, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+
+            sw1 = motor_data_buffer_[off++];
+            sw2 = motor_data_buffer_[off++];
+
+            std::memcpy(&mouse_x, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+            std::memcpy(&mouse_y, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+            mouse_l = motor_data_buffer_[off++];
+            mouse_r = motor_data_buffer_[off++];
+
+            std::memcpy(&key_code, motor_data_buffer_.data() + off, sizeof(uint16_t)); off += sizeof(uint16_t);
+            std::memcpy(&wheel, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+
+            if (rc_dbus_pub_)
+            {
+              tide_msgs::msg::RcData msg;
+              msg.ch1 = ch1;
+              msg.ch2 = ch2;
+              msg.ch3 = ch3;
+              msg.ch4 = ch4;
+              msg.sw1 = sw1;
+              msg.sw2 = sw2;
+              msg.mouse_x = mouse_x;
+              msg.mouse_y = mouse_y;
+              msg.mouse_l = mouse_l;
+              msg.mouse_r = mouse_r;
+              msg.key_code = key_code;
+              msg.wheel = wheel;
+              rc_dbus_pub_->publish(msg);
+            }
+          }
+
+          // 移除已处理的数据包
+          motor_rx_buffer_.erase(motor_rx_buffer_.begin(), motor_rx_buffer_.begin() + total_packet_size);
+          continue;
+        }
         
         // 打印纯净数据（十六进制格式）- 使用限流避免刷屏
         if (!motor_data_buffer_.empty())
@@ -636,6 +699,9 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
             }
           }
         }
+
+        // 移除已处理的数据包
+        motor_rx_buffer_.erase(motor_rx_buffer_.begin(), motor_rx_buffer_.begin() + total_packet_size);
       }
       else
       {
