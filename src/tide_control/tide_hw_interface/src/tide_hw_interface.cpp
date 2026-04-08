@@ -278,6 +278,7 @@ TideHardwareInterface::on_init(const hardware_interface::HardwareInfo& info)
   }
 
   rc_dbus_pub_ = nh_->create_publisher<tide_msgs::msg::RcData>("rc/dbus", 10);
+  chassis_motor_trans_pub_ = nh_->create_publisher<tide_msgs::msg::ChassisMotorTrans>("chassis/motor_trans", 10);
 
   for (const auto& joint : info_.joints)
   {
@@ -559,8 +560,17 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
         // [wheel] (int16)
         if (motor_data_buffer_.size() >= 1 && motor_data_buffer_[0] == 0x10)
         {
-          // payload length should be 19 bytes for RC_DBUS
-          if (motor_data_buffer_.size() >= 19)
+          // payload layout:
+          // [0] msg_id
+          // [1..19] RC_DBUS (19 bytes)
+          // [20..] 4 motors, each 12 bytes:
+          //   motor_id(uint8) speed_rpm(int16) total_angle(float32) ecd(uint16) real_current(int16) temperature(uint8)
+          constexpr size_t kRcPayloadLen = 19;
+          constexpr size_t kMotorBlockLen = 12;
+          constexpr size_t kMotorCount = 4;
+          constexpr size_t kMinTotalLen = 1 + kRcPayloadLen; // msg_id + rc
+
+          if (motor_data_buffer_.size() >= kMinTotalLen)
           {
             size_t off = 1;
 
@@ -603,6 +613,71 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
               msg.key_code = key_code;
               msg.wheel = wheel;
               rc_dbus_pub_->publish(msg);
+            }
+
+            // Parse 4 motors appended after RC section (if present)
+            const size_t motors_base = 1 + kRcPayloadLen;
+            const size_t expected_total_with_motors = motors_base + kMotorCount * kMotorBlockLen;
+            if (motor_data_buffer_.size() >= expected_total_with_motors)
+            {
+              tide_msgs::msg::ChassisMotorTrans motor_msg;
+              motor_msg.header.stamp = nh_->now();
+              motor_msg.header.frame_id = "";
+
+              size_t moff = motors_base;
+              for (size_t mi = 0; mi < kMotorCount; ++mi)
+              {
+                uint8_t motor_id;
+                int16_t speed_rpm;
+                float total_angle;
+                uint16_t ecd;
+                int16_t real_current;
+                uint8_t temperature;
+
+                motor_id = motor_data_buffer_[moff++];
+                std::memcpy(&speed_rpm, motor_data_buffer_.data() + moff, sizeof(int16_t)); moff += sizeof(int16_t);
+                std::memcpy(&total_angle, motor_data_buffer_.data() + moff, sizeof(float)); moff += sizeof(float);
+                std::memcpy(&ecd, motor_data_buffer_.data() + moff, sizeof(uint16_t)); moff += sizeof(uint16_t);
+                std::memcpy(&real_current, motor_data_buffer_.data() + moff, sizeof(int16_t)); moff += sizeof(int16_t);
+                temperature = motor_data_buffer_[moff++];
+
+                motor_msg.motor_id[mi] = motor_id;
+                motor_msg.speed_rpm[mi] = speed_rpm;
+                motor_msg.total_angle[mi] = total_angle;
+                motor_msg.ecd[mi] = ecd;
+                motor_msg.real_current[mi] = real_current;
+                motor_msg.temperature[mi] = temperature;
+
+                // Update internal motor state if we can match by tx_id
+                for (size_t i = 0; i < motors_.size(); ++i)
+                {
+                  if (motors_[i]->config_.tx_id == motor_id)
+                  {
+                    motors_[i]->angle_current = static_cast<double>(total_angle);
+                    motors_[i]->measure.speed_aps = static_cast<double>(speed_rpm);
+                    motors_[i]->measure.ecd = ecd;
+                    motors_[i]->measure.real_current = real_current;
+                    motors_[i]->measure.temperature = temperature;
+
+                    {
+                      std::lock_guard<std::mutex> lock(state_mutex_);
+                      state_positions_[i] = static_cast<double>(total_angle);
+                      state_velocities_[i] = static_cast<double>(speed_rpm);
+                      state_currents_[i] = static_cast<double>(real_current);
+                      state_temperatures_[i] = static_cast<double>(temperature);
+                    }
+
+                    motors_[i]->update_timestamp(rclcpp::Clock().now());
+                    motors_[i]->status = MOTOR_OK;
+                    break;
+                  }
+                }
+              }
+
+              if (chassis_motor_trans_pub_)
+              {
+                chassis_motor_trans_pub_->publish(motor_msg);
+              }
             }
           }
 

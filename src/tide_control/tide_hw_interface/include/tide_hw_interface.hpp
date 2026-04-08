@@ -15,6 +15,7 @@
 #include "sensor_msgs/msg/imu.hpp"
 #include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "tide_msgs/msg/rc_data.hpp"
+#include "tide_msgs/msg/chassis_motor_trans.hpp"
 #include "tide_motor.hpp"
 #include <atomic>
 #include <condition_variable>
@@ -245,6 +246,7 @@ private:
   // 方案三：保留节点和RPY发布器，删除IMU发布器和spin线程
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr rpy_pub_;
   rclcpp::Publisher<tide_msgs::msg::RcData>::SharedPtr rc_dbus_pub_;
+  rclcpp::Publisher<tide_msgs::msg::ChassisMotorTrans>::SharedPtr chassis_motor_trans_pub_;
   std::shared_ptr<rclcpp::Node> nh_;
 };
 

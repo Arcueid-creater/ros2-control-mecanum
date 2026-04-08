@@ -34,7 +34,9 @@ static struct gimbal_fdb_msg gimbal_fdb;
 MCN_DECLARE(gimbal_ins_topic);
 static McnNode_t gimbal_ins_node;
 static struct dm_imu_t gim_ins;
-
+MCN_DECLARE(chassis_motor_trans_topic);
+static McnNode_t chassis_motor_trans_node;
+static struct chassis_motor_msg chassis_motor_msg;
 // 内部函数声明
 static void trans_pub_push(void);
 static void trans_sub_init(void);
@@ -156,7 +158,7 @@ typedef enum
 
 static void send_rc_dbus_data(const rc_dbus_obj_t* rc)
 {
-    uint8_t data[32];
+    uint8_t data[128];
     size_t offset = 0;
 
     if (rc == NULL)
@@ -181,6 +183,16 @@ static void send_rc_dbus_data(const rc_dbus_obj_t* rc)
 
     memcpy(data + offset, &rc->kb.key_code, sizeof(rc->kb.key_code)); offset += sizeof(rc->kb.key_code);
     memcpy(data + offset, &rc->wheel, sizeof(rc->wheel)); offset += sizeof(rc->wheel);
+    for (int i = 0;i<4; i++)
+    {
+        chassis_motor_trans msgs=chassis_motor_msg.motor_tran_msg[i];
+        memcpy(data + offset, &msgs.motor_id, sizeof(msgs.motor_id)); offset += sizeof(msgs.motor_id);          //1
+        memcpy(data + offset, &msgs.speed_rpm, sizeof(msgs.speed_rpm)); offset += sizeof(msgs.speed_rpm);       //2
+        memcpy(data + offset, &msgs.total_angle, sizeof(msgs.total_angle)); offset += sizeof(msgs.total_angle);//4
+        memcpy(data + offset, &msgs.ecd, sizeof(msgs.ecd)); offset += sizeof(msgs.ecd);                         //2
+        memcpy(data + offset, &msgs.real_current, sizeof(msgs.real_current)); offset += sizeof(msgs.real_current);//2
+        memcpy(data + offset, &msgs.temperature, sizeof(msgs.temperature)); offset += sizeof(msgs.temperature);//1
+    }
 
     send_custom_data(data, (uint16_t)offset);
 }
@@ -411,20 +423,7 @@ void trans_control_task(void)
 
     /* 上发：已接收到的遥控器数据（DBUS decode 后的 rc_now） */
     send_rc_dbus_data(rc_now);
-    
-    // 方式2：发送单个电机数据
-    // send_single_motor(1, gimbal_fdb.yaw_offset_angle, gim_ins.yaw, 0, 0);
-    
-    // 方式3：发送多个电机数据
-    // MotorData_t motors[3];
-    // motors[0].motor_id = 1;
-    // motors[0].position = gimbal_fdb.yaw_offset_angle;
-    // motors[0].velocity = gim_ins.yaw;
-    // motors[0].current = 0;
-    // motors[0].temperature = 0;
-    // // ... 填充其他电机
-    // send_multiple_motors(motors, 3);
-    
+
     /* ==================== 发布数据更新 ==================== */
     trans_pub_push();
     
@@ -450,6 +449,7 @@ static void trans_sub_init(void)
     gimbal_cmd_node = mcn_subscribe(MCN_HUB(gimbal_cmd), NULL, NULL);
     gimbal_fdb_node = mcn_subscribe(MCN_HUB(gimbal_fdb_topic), NULL, NULL);
     gimbal_ins_node = mcn_subscribe(MCN_HUB(gimbal_ins_topic), NULL, NULL);
+    chassis_motor_trans_node= mcn_subscribe(MCN_HUB(chassis_motor_trans_topic), NULL, NULL);
 }
 
 static void trans_sub_pull(void)
@@ -473,5 +473,9 @@ static void trans_sub_pull(void)
     if (mcn_poll(gimbal_ins_node))
     {
         mcn_copy(MCN_HUB(gimbal_ins_topic), gimbal_ins_node, &gim_ins);
+    }
+    if (mcn_poll(chassis_motor_trans_node))
+    {
+        mcn_copy(MCN_HUB(chassis_motor_trans_topic), chassis_motor_trans_node, &chassis_motor_msg);
     }
 }
