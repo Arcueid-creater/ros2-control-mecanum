@@ -565,7 +565,7 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
           // [1..19] RC_DBUS (19 bytes)
           // [20..] 4 motors, each 12 bytes:
           //   motor_id(uint8) speed_rpm(int16) total_angle(float32) ecd(uint16) real_current(int16) temperature(uint8)
-          constexpr size_t kRcPayloadLen = 19;
+          constexpr size_t kRcPayloadLen = 20;
           constexpr size_t kMotorBlockLen = 12;
           constexpr size_t kMotorCount = 4;
           constexpr size_t kMinTotalLen = 1 + kRcPayloadLen; // msg_id + rc
