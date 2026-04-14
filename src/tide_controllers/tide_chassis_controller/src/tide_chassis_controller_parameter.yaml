@@ -2,10 +2,7 @@ tide_chassis_controller:
   wheel_joints: {
     type: string_array,
     default_value: [],
-    description: "Names of the wheel joints (e.g., front_left, front_right, rear_left, rear_right)",
-    validation: {
-      not_empty<>: []
-    }
+    description: "Names of the wheel joints (e.g., front_left, front_right, rear_left, rear_right)"
   }
   
   wheel_radius: {

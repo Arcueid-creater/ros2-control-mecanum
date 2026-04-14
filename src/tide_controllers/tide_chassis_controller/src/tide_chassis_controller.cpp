@@ -110,7 +110,7 @@ controller_interface::return_type TideChassisController::update(const rclcpp::Ti
   // 每1000次打印一次，避免日志过多
   if (update_count % 1000 == 1)
   {
-    RCLCPP_INFO(get_node()->get_logger(), "Chassis Controller update() called! Count: %d", update_count);
+    // RCLCPP_INFO(get_node()->get_logger(), "Chassis Controller update() called! Count: %d", update_count);
   }
 
   update_parameters();
@@ -127,9 +127,9 @@ controller_interface::return_type TideChassisController::update(const rclcpp::Ti
     // 每1000次打印一次命令信息
     if (update_count % 1000 == 1)
     {
-      RCLCPP_INFO(get_node()->get_logger(), 
-                  "Received cmd - linear_x: %.3f, linear_y: %.3f, angular_z: %.3f",
-                  linear_x_cmd_, linear_y_cmd_, angular_z_cmd_);
+      // RCLCPP_INFO(get_node()->get_logger(), 
+      //             "Received cmd - linear_x: %.3f, linear_y: %.3f, angular_z: %.3f",
+      //             linear_x_cmd_, linear_y_cmd_, angular_z_cmd_);
     }
   }
   
