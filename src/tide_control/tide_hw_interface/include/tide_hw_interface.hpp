@@ -223,6 +223,25 @@ private:
   std::vector<double> state_currents_;
   std::vector<double> state_temperatures_;
   
+  // 底盘速度命令接口（直接内存访问，零延迟）
+  double chassis_cmd_linear_x_{0.0};
+  double chassis_cmd_linear_y_{0.0};
+  double chassis_cmd_angular_z_{0.0};
+  
+  // 遥控器状态接口（直接内存访问，零延迟）
+  double rc_ch1_{0.0};
+  double rc_ch2_{0.0};
+  double rc_ch3_{0.0};
+  double rc_ch4_{0.0};
+  double rc_sw1_{0.0};
+  double rc_sw2_{0.0};
+  double rc_mouse_x_{0.0};
+  double rc_mouse_y_{0.0};
+  double rc_mouse_l_{0.0};
+  double rc_mouse_r_{0.0};
+  double rc_key_code_{0.0};
+  double rc_wheel_{0.0};
+  
   std::vector<uint8_t> motor_rx_buffer_;    // 电机接收缓冲区
   std::vector<uint8_t> motor_data_buffer_;  // 存储解析后的电机数据（不含帧头帧尾和CRC）
   std::vector<uint8_t> imu_rx_buffer_;

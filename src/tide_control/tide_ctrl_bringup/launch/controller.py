@@ -71,6 +71,16 @@ right_shooter_controller = Node(
     ],
 )
 
+chassis_controller = Node(
+    package="controller_manager",
+    executable="spawner",
+    arguments=[
+        "chassis_controller",
+        "--controller-manager",
+        "/controller_manager",
+    ],
+)
+
 
 def choose_controllers(robot_type):
     sentry_controllers = GroupAction(
@@ -80,6 +90,7 @@ def choose_controllers(robot_type):
             right_gimbal_controller,
             left_shooter_controller,
             right_shooter_controller,
+            chassis_controller,
         ]
     )
 
@@ -87,6 +98,7 @@ def choose_controllers(robot_type):
         [
             joint_state_broadcaster,
             gimbal_controller,
+            chassis_controller,
         ]
     )
 

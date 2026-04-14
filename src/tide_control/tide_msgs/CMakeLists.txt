@@ -25,6 +25,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FdFrame.msg"
   "msg/RcData.msg"
   "msg/ChassisMotorTrans.msg"
+  "msg/ChassisCmd.msg"
+  "msg/ChassisState.msg"
   "msg/vision/Armor.msg"
   "msg/vision/Armors.msg"
   "msg/vision/DebugArmor.msg"

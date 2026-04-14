@@ -1,0 +1,9 @@
+<library path="tide_chassis_controller">
+    <class name="tide_chassis_controller/TideChassisController"
+            type="tide_chassis_controller::TideChassisController" 
+            base_class_type="controller_interface::ControllerInterface">
+    <description>
+        Chassis controller for tide robot with mecanum wheel support.
+    </description>
+    </class>
+</library>

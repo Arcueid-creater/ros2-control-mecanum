@@ -433,6 +433,20 @@ std::vector<hardware_interface::StateInterface> TideHardwareInterface::export_st
     }
   }
   
+  // 导出遥控器状态接口（GPIO类型，用于直接内存访问）
+  interfaces.emplace_back("rc", "ch1", &rc_ch1_);
+  interfaces.emplace_back("rc", "ch2", &rc_ch2_);
+  interfaces.emplace_back("rc", "ch3", &rc_ch3_);
+  interfaces.emplace_back("rc", "ch4", &rc_ch4_);
+  interfaces.emplace_back("rc", "sw1", &rc_sw1_);
+  interfaces.emplace_back("rc", "sw2", &rc_sw2_);
+  interfaces.emplace_back("rc", "mouse_x", &rc_mouse_x_);
+  interfaces.emplace_back("rc", "mouse_y", &rc_mouse_y_);
+  interfaces.emplace_back("rc", "mouse_l", &rc_mouse_l_);
+  interfaces.emplace_back("rc", "mouse_r", &rc_mouse_r_);
+  interfaces.emplace_back("rc", "key_code", &rc_key_code_);
+  interfaces.emplace_back("rc", "wheel", &rc_wheel_);
+  
   return interfaces;
 }
 
@@ -440,6 +454,7 @@ std::vector<hardware_interface::CommandInterface> TideHardwareInterface::export_
 {
   std::vector<hardware_interface::CommandInterface> interfaces;
 
+  // 导出关节命令接口
   for (size_t i = 0; i < joint_count; i++)
   {
     for (const auto& command_interface : info_.joints[i].command_interfaces)
@@ -454,6 +469,12 @@ std::vector<hardware_interface::CommandInterface> TideHardwareInterface::export_
       }
     }
   }
+  
+  // 导出底盘速度命令接口（GPIO类型，用于非关节命令）
+  interfaces.emplace_back("chassis", "linear_x", &chassis_cmd_linear_x_);
+  interfaces.emplace_back("chassis", "linear_y", &chassis_cmd_linear_y_);
+  interfaces.emplace_back("chassis", "angular_z", &chassis_cmd_angular_z_);
+  
   return interfaces;
 }
 
@@ -596,6 +617,20 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
 
             std::memcpy(&key_code, motor_data_buffer_.data() + off, sizeof(uint16_t)); off += sizeof(uint16_t);
             std::memcpy(&wheel, motor_data_buffer_.data() + off, sizeof(int16_t)); off += sizeof(int16_t);
+
+            // 更新遥控器状态接口（直接内存访问，供控制器读取）
+            rc_ch1_ = static_cast<double>(ch1);
+            rc_ch2_ = static_cast<double>(ch2);
+            rc_ch3_ = static_cast<double>(ch3);
+            rc_ch4_ = static_cast<double>(ch4);
+            rc_sw1_ = static_cast<double>(sw1);
+            rc_sw2_ = static_cast<double>(sw2);
+            rc_mouse_x_ = static_cast<double>(mouse_x);
+            rc_mouse_y_ = static_cast<double>(mouse_y);
+            rc_mouse_l_ = static_cast<double>(mouse_l);
+            rc_mouse_r_ = static_cast<double>(mouse_r);
+            rc_key_code_ = static_cast<double>(key_code);
+            rc_wheel_ = static_cast<double>(wheel);
 
             if (rc_dbus_pub_)
             {
@@ -1185,32 +1220,28 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
     return hardware_interface::return_type::OK;
   }
 
-  // ========== 发送自定义数据给下位机 ==========
+  // ========== 发送底盘速度命令给下位机（直接内存访问，零延迟）==========
   
-  // 方式1：只发送浮点数（最简单）
-  std::vector<float> float_data;
+  // 直接读取控制器写入的内存变量（无需话题通信）
+  // 构建底盘命令数据包
+  // 格式：[msg_id=0x20][linear_x][linear_y][angular_z]
+  PacketBuilder builder;
+  builder.addByte(0x20)  // 消息ID：底盘速度命令
+         .addFloat(static_cast<float>(chassis_cmd_linear_x_))
+         .addFloat(static_cast<float>(chassis_cmd_linear_y_))
+         .addFloat(static_cast<float>(chassis_cmd_angular_z_));
   
-  // 添加所有关节的位置和速度
-  for (size_t i = 0; i < joint_count; i++)
+  // 发送数据
+  sendCustomData(builder.getData());
+  
+  // 可选：打印调试信息（使用限流）
+  static int send_count = 0;
+  if (++send_count % 100 == 0)  // 每100次打印一次
   {
-    double position_cmd = 0.0;
-    double velocity_cmd = 0.0;
-    
-    if (!std::isnan(cmd_positions_[i]) && info_.joints[i].command_interfaces[0].name == "position")
-    {
-      position_cmd = cmd_positions_[i];
-    }
-    if (!std::isnan(cmd_velocities_[i]) && info_.joints[i].command_interfaces[0].name == "velocity")
-    {
-      velocity_cmd = cmd_velocities_[i];
-    }
-    
-    float_data.push_back(static_cast<float>(position_cmd));
-    float_data.push_back(static_cast<float>(velocity_cmd));
+    RCLCPP_DEBUG(rclcpp::get_logger("TideHardwareInterface"),
+                "Sent chassis cmd to serial: vx=%.3f, vy=%.3f, wz=%.3f",
+                chassis_cmd_linear_x_, chassis_cmd_linear_y_, chassis_cmd_angular_z_);
   }
-  
-  // 发送浮点数数组
-  sendFloatArray(float_data);
   
   // 方式2：发送混合数据（浮点数 + 整数）
   // PacketBuilder builder;

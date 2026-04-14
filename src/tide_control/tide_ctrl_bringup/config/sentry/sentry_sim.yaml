@@ -17,6 +17,9 @@ controller_manager:
     right_shooter_controller:
       type: "tide_shooter_controller/TideShooterController"
 
+    chassis_controller:
+      type: "tide_chassis_controller/TideChassisController"
+
 # open_loop := false时使用gazebo pid控制器
 # gazebo_ros2_control:
 #   ros__parameters:
@@ -122,3 +125,24 @@ right_shooter_controller:
     loader:
       joint: "loader1_joint"
       reverse: true
+
+chassis_controller:
+  ros__parameters:
+    # Sentry chassis wheel joints
+    wheel_joints:
+      - "front_left_wheel_joint"
+      - "front_right_wheel_joint"
+      - "rear_left_wheel_joint"
+      - "rear_right_wheel_joint"
+    
+    # Robot dimensions (adjust according to actual sentry robot)
+    wheel_radius: 0.076        # meters
+    wheel_base: 0.4            # meters (front to rear)
+    wheel_track: 0.4           # meters (left to right)
+    
+    # Velocity limits
+    max_linear_velocity: 3.0   # m/s
+    max_angular_velocity: 3.0  # rad/s
+    
+    # Enable odometry
+    enable_odom: true

@@ -1,0 +1,45 @@
+tide_chassis_controller:
+  wheel_joints: {
+    type: string_array,
+    default_value: [],
+    description: "Names of the wheel joints (e.g., front_left, front_right, rear_left, rear_right)",
+    validation: {
+      not_empty<>: []
+    }
+  }
+  
+  wheel_radius: {
+    type: double,
+    default_value: 0.076,
+    description: "Radius of the wheels in meters"
+  }
+  
+  wheel_base: {
+    type: double,
+    default_value: 0.4,
+    description: "Distance between front and rear wheels in meters"
+  }
+  
+  wheel_track: {
+    type: double,
+    default_value: 0.4,
+    description: "Distance between left and right wheels in meters"
+  }
+  
+  max_linear_velocity: {
+    type: double,
+    default_value: 3.0,
+    description: "Maximum linear velocity in m/s"
+  }
+  
+  max_angular_velocity: {
+    type: double,
+    default_value: 3.0,
+    description: "Maximum angular velocity in rad/s"
+  }
+  
+  enable_odom: {
+    type: bool,
+    default_value: true,
+    description: "Enable odometry publishing"
+  }
