@@ -42,16 +42,6 @@ InterfaceConfiguration TideChassisController::command_interface_configuration() 
 {
   std::vector<std::string> conf_names;
   
-  // 确保参数已加载
-  if (param_listener_)
-  {
-    auto params = param_listener_->get_params();
-    for (const auto& joint : params.wheel_joints)
-    {
-      conf_names.push_back(joint + "/velocity");
-    }
-  }
-  
   // 添加底盘速度命令接口（直接内存访问）
   conf_names.push_back("chassis/linear_x");
   conf_names.push_back("chassis/linear_y");
@@ -63,16 +53,6 @@ InterfaceConfiguration TideChassisController::command_interface_configuration() 
 InterfaceConfiguration TideChassisController::state_interface_configuration() const
 {
   std::vector<std::string> conf_names;
-  
-  // 确保参数已加载
-  if (param_listener_)
-  {
-    auto params = param_listener_->get_params();
-    for (const auto& joint : params.wheel_joints)
-    {
-      conf_names.push_back(joint + "/velocity");
-    }
-  }
 
   // 添加遥控器状态接口（直接内存访问）
   conf_names.push_back("rc/ch1");
@@ -199,16 +179,7 @@ controller_interface::return_type TideChassisController::update(const rclcpp::Ti
     
   }
   
-
-  // TODO: Implement mecanum wheel kinematics
-  // For now, just set zero velocity to all wheels
-  for (size_t i = 0; i < wheel_command_interfaces_.size(); ++i)
-  {
-    wheel_command_interfaces_[i]->set_value(0.0);
-  }
-  
   // 直接写入底盘速度命令到硬件接口（零延迟，直接内存访问）
-  // 使用 map 统一管理，代码更简洁
   if (chassis_cmd_interfaces_.count("linear_x"))
   {
     chassis_cmd_interfaces_["linear_x"]->set_value(linear_x_cmd_);
@@ -240,7 +211,6 @@ controller_interface::CallbackReturn
 TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
   // Assign command interfaces
-  wheel_command_interfaces_.clear();
   chassis_cmd_interfaces_.clear();
   
   for (auto& cmd_interface : command_interfaces_)
@@ -256,16 +226,9 @@ TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_sta
       RCLCPP_INFO(get_node()->get_logger(), "Claimed chassis/%s command interface", 
                   interface_name.c_str());
     }
-    else
-    {
-      // 轮子速度命令接口
-      wheel_command_interfaces_.push_back(
-          std::make_unique<hardware_interface::LoanedCommandInterface>(std::move(cmd_interface)));
-    }
   }
 
   // Assign state interfaces
-  wheel_state_interfaces_.clear();
   rc_state_interfaces_.clear();
   
   for (auto& state_interface : state_interfaces_)
@@ -281,13 +244,6 @@ TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_sta
       RCLCPP_INFO(get_node()->get_logger(), "Claimed rc/%s state interface", 
                   interface_name.c_str());
     }
-    else
-    {
-      // 轮子状态接口
-      wheel_state_interfaces_.push_back(
-          std::make_unique<const hardware_interface::LoanedStateInterface>(
-              std::move(state_interface)));
-    }
   }
 
   RCLCPP_INFO(get_node()->get_logger(), 
@@ -300,8 +256,6 @@ TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_sta
 controller_interface::CallbackReturn
 TideChassisController::on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
-  wheel_command_interfaces_.clear();
-  wheel_state_interfaces_.clear();
   chassis_cmd_interfaces_.clear();
   rc_state_interfaces_.clear();
 

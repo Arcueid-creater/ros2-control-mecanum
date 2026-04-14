@@ -66,12 +66,6 @@ private:
 
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
-
-  // Command interfaces for wheels
-  std::vector<std::unique_ptr<hardware_interface::LoanedCommandInterface>> wheel_command_interfaces_;
-  
-  // State interfaces for wheels
-  std::vector<std::unique_ptr<const hardware_interface::LoanedStateInterface>> wheel_state_interfaces_;
   
   // 遥控器状态接口（直接内存访问）
   std::unordered_map<std::string, std::unique_ptr<const hardware_interface::LoanedStateInterface>> 

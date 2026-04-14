@@ -1243,41 +1243,7 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
                 chassis_cmd_linear_x_, chassis_cmd_linear_y_, chassis_cmd_angular_z_);
   }
   
-  // 方式2：发送混合数据（浮点数 + 整数）
-  // PacketBuilder builder;
-  // 
-  // // 添加数据包类型
-  // builder.addByte(0x01);
-  // 
-  // // 添加时间戳
-  // builder.addUInt32(static_cast<uint32_t>(
-  //   std::chrono::system_clock::now().time_since_epoch().count() / 1000000
-  // ));
-  // 
-  // // 添加关节数据
-  // for (size_t i = 0; i < joint_count; i++)
-  // {
-  //   double position_cmd = 0.0;
-  //   double velocity_cmd = 0.0;
-  //   
-  //   if (!std::isnan(cmd_positions_[i]) && info_.joints[i].command_interfaces[0].name == "position")
-  //   {
-  //     position_cmd = cmd_positions_[i];
-  //   }
-  //   if (!std::isnan(cmd_velocities_[i]) && info_.joints[i].command_interfaces[0].name == "velocity")
-  //   {
-  //     velocity_cmd = cmd_velocities_[i];
-  //   }
-  //   
-  //   builder.addFloat(static_cast<float>(position_cmd))
-  //          .addFloat(static_cast<float>(velocity_cmd));
-  // }
-  // 
-  // // 添加状态标志
-  // builder.addUInt16(0x0001);
-  // 
-  // // 发送
-  // sendCustomData(builder.getData());
+
 
   return hardware_interface::return_type::OK;
 }

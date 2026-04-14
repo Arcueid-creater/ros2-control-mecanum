@@ -128,21 +128,8 @@ right_shooter_controller:
 
 chassis_controller:
   ros__parameters:
-    # Sentry chassis wheel joints
-    wheel_joints:
-      - "front_left_wheel_joint"
-      - "front_right_wheel_joint"
-      - "rear_left_wheel_joint"
-      - "rear_right_wheel_joint"
-    
-    # Robot dimensions (adjust according to actual sentry robot)
-    wheel_radius: 0.076        # meters
-    wheel_base: 0.4            # meters (front to rear)
-    wheel_track: 0.4           # meters (left to right)
-    
-    # Velocity limits
+    # 底盘速度限制
     max_linear_velocity: 3.0   # m/s
     max_angular_velocity: 3.0  # rad/s
     
-    # Enable odometry
-    enable_odom: true
+    # 注意：运动学解算在下位机完成，上位机只发送速度命令
