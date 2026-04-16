@@ -117,28 +117,22 @@ controller_interface::return_type TideChassisController::update(const rclcpp::Ti
 
   // ========== 方式1：从话题接收命令（上层应用控制）==========
   auto cmd = *recv_cmd_ptr_.readFromRT();
+  bool topic_active = (cmd != nullptr);
   
-  if (cmd != nullptr)
+  if (topic_active)
   {
     linear_x_cmd_ = cmd->linear_x;
     linear_y_cmd_ = cmd->linear_y;
     angular_z_cmd_ = cmd->angular_z;
-    
-    // 每1000次打印一次命令信息
-    if (update_count % 1000 == 1)
-    {
-      // RCLCPP_INFO(get_node()->get_logger(), 
-      //             "Received cmd - linear_x: %.3f, linear_y: %.3f, angular_z: %.3f",
-      //             linear_x_cmd_, linear_y_cmd_, angular_z_cmd_);
-    }
   }
   
   // ========== 方式2：直接读取遥控器数据（零延迟，直接内存访问）==========
-  // 如果需要遥控器直接控制底盘，取消下面的注释
-  
+  bool rc_active = false;
+  bool rc_connected = false;
   if (rc_state_interfaces_.count("ch1") && rc_state_interfaces_.count("ch2") && 
       rc_state_interfaces_.count("ch3") && rc_state_interfaces_.count("sw1"))
   {
+    rc_connected = true;
     // 读取遥控器摇杆值（范围：-660 ~ 660）
     double ch1 = rc_state_interfaces_["ch1"]->get_value();  // 右摇杆左右（底盘Y轴）
     double ch2 = rc_state_interfaces_["ch2"]->get_value();  // 右摇杆上下（底盘X轴）
@@ -149,33 +143,56 @@ controller_interface::return_type TideChassisController::update(const rclcpp::Ti
     double norm_ch1 = ch1 / 660.0;
     double norm_ch2 = ch2 / 660.0;
     double norm_ch3 = ch3 / 660.0;
-    
-    // 设置最大速度（根据拨杆位置调整）
-    double max_linear_vel = 1.0;   // m/s
-    double max_angular_vel = 2.0;  // rad/s
-    
-    if (sw1 == 1)  // 上位：慢速模式
+
+    // 只要有任意一个通道有输入（超过死区），就认为遥控器处于活动状态
+    const double rc_deadzone = 0.05;
+    if (std::abs(norm_ch1) > rc_deadzone || std::abs(norm_ch2) > rc_deadzone || std::abs(norm_ch3) > rc_deadzone)
     {
-      max_linear_vel = 0.5;
-      max_angular_vel = 1.0;
+      rc_active = true;
     }
-    else if (sw1 == 3)  // 下位：快速模式
+    
+    // 优先级逻辑：
+    // 1. 如果遥控器有动作 (rc_active)，强制使用遥控器控制（抢占权限）
+    // 2. 如果遥控器无动作，但话题有指令 (topic_active)，使用话题控制
+    // 3. 如果两者都没有，则进入 RC 计算块（确保在没有话题时，RC 零位能维持静止）
+    if (rc_active || !topic_active)
     {
-      max_linear_vel = 2.0;
-      max_angular_vel = 4.0;
+      // 设置最大速度（根据拨杆位置调整）
+      double max_linear_vel = 1.0;   // m/s
+      double max_angular_vel = 2.0;  // rad/s
+      
+      if (sw1 == 1)  // 上位：慢速模式
+      {
+        max_linear_vel = 0.5;
+        max_angular_vel = 1.0;
+      }
+      else if (sw1 == 3)  // 下位：快速模式
+      {
+        max_linear_vel = 2.0;
+        max_angular_vel = 4.0;
+      }
+      
+      // 计算底盘速度命令
+      linear_x_cmd_ = norm_ch2 * max_linear_vel;   // 前后
+      linear_y_cmd_ = norm_ch1 * max_linear_vel;   // 左右
+      angular_z_cmd_ = norm_ch3 * max_angular_vel; // 旋转
+      
+      // 死区处理（避免摇杆漂移）
+      const double deadzone = 0.05;
+      if (std::abs(linear_x_cmd_) < deadzone) linear_x_cmd_ = 0.0;
+      if (std::abs(linear_y_cmd_) < deadzone) linear_y_cmd_ = 0.0;
+      if (std::abs(angular_z_cmd_) < deadzone) angular_z_cmd_ = 0.0;
     }
-    // sw1 == 2：中位，使用默认速度
-    
-    // 计算底盘速度命令
-    linear_x_cmd_ = norm_ch2 * max_linear_vel;   // 前后
-    linear_y_cmd_ = norm_ch1 * max_linear_vel;   // 左右
-    angular_z_cmd_ = norm_ch3 * max_angular_vel; // 旋转
-    
-    // 死区处理（避免摇杆漂移）
-    const double deadzone = 0.05;
-    if (std::abs(linear_x_cmd_) < deadzone) linear_x_cmd_ = 0.0;
-    if (std::abs(linear_y_cmd_) < deadzone) linear_y_cmd_ = 0.0;
-    if (std::abs(angular_z_cmd_) < deadzone) angular_z_cmd_ = 0.0;
+  }
+  
+  // 每1000次打印一次最终命令信息
+  if (update_count % 1000 == 1)
+  {
+    std::string source = "None";
+    if (rc_active) source = "RC (Active)";
+    else if (topic_active) source = "Topic";
+    else if (rc_connected) source = "RC (Idle)";
+
     
   }
   
@@ -223,8 +240,7 @@ TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_sta
     {
       chassis_cmd_interfaces_[interface_name] = 
           std::make_unique<hardware_interface::LoanedCommandInterface>(std::move(cmd_interface));
-      RCLCPP_INFO(get_node()->get_logger(), "Claimed chassis/%s command interface", 
-                  interface_name.c_str());
+      
     }
   }
 
@@ -241,15 +257,11 @@ TideChassisController::on_activate(const rclcpp_lifecycle::State& /*previous_sta
     {
       rc_state_interfaces_[interface_name] = 
           std::make_unique<const hardware_interface::LoanedStateInterface>(std::move(state_interface));
-      RCLCPP_INFO(get_node()->get_logger(), "Claimed rc/%s state interface", 
-                  interface_name.c_str());
+      
     }
   }
 
-  RCLCPP_INFO(get_node()->get_logger(), 
-              "Chassis controller activated with %zu chassis interfaces and %zu rc interfaces", 
-              chassis_cmd_interfaces_.size(), rc_state_interfaces_.size());
-
+ 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 

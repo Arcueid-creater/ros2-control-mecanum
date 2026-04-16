@@ -183,6 +183,7 @@ void SerialDevice::run()
   while (running_ && rclcpp::ok())
   {
     // Check for data to write
+    std::vector<std::vector<uint8_t>> current_write_queue;
     {
       std::unique_lock<std::mutex> lock(write_mutex_);
       if (write_cv_.wait_for(lock, std::chrono::milliseconds(1), [this] { return !write_queue_.empty() || !running_; }))
@@ -190,11 +191,16 @@ void SerialDevice::run()
         if (!running_) break;
         while (!write_queue_.empty())
         {
-          const auto& data = write_queue_.front();
-          ::write(fd_, data.data(), data.size());
+          current_write_queue.push_back(std::move(write_queue_.front()));
           write_queue_.pop();
         }
       }
+    }
+
+    // Perform actual write outside the lock to avoid blocking RT thread
+    for (const auto& data : current_write_queue)
+    {
+      ::write(fd_, data.data(), data.size());
     }
 
     // Check for data to read
@@ -632,6 +638,9 @@ void TideHardwareInterface::parseMotorData(const std::vector<uint8_t>& data)
             rc_key_code_ = static_cast<double>(key_code);
             rc_wheel_ = static_cast<double>(wheel);
 
+            // 调试日志：每秒打印一次遥控器原始值
+           
+
             if (rc_dbus_pub_)
             {
               tide_msgs::msg::RcData msg;
@@ -938,6 +947,7 @@ void TideHardwareInterface::parseImuData(const uint8_t* frame)
 
 void TideHardwareInterface::stopMotors()
 {
+  RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"), "Stopping all motors...");
   for (auto& motor : motors_)
   {
     motor->stop();
@@ -1200,7 +1210,7 @@ hardware_interface::return_type TideHardwareInterface::read(const rclcpp::Time& 
   return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time& /*time*/,
+hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time& time,
                                                              const rclcpp::Duration& /*period*/)
 {
   if (need_calibration_)
@@ -1220,6 +1230,14 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
     return hardware_interface::return_type::OK;
   }
 
+  // 控制发送频率为 500Hz (2ms 间隔)
+  static rclcpp::Time last_write_time(0, 0, time.get_clock_type());
+  if ((time - last_write_time).seconds() < 0.002) // 500Hz -> 2ms
+  {
+    return hardware_interface::return_type::OK;
+  }
+  last_write_time = time;
+
   // ========== 发送底盘速度命令给下位机（直接内存访问，零延迟）==========
   
   // 直接读取控制器写入的内存变量（无需话题通信）
@@ -1235,13 +1253,13 @@ hardware_interface::return_type TideHardwareInterface::write(const rclcpp::Time&
   sendCustomData(builder.getData());
   
   // 可选：打印调试信息（使用限流）
-  static int send_count = 0;
-  if (++send_count % 100 == 0)  // 每100次打印一次
-  {
-    RCLCPP_DEBUG(rclcpp::get_logger("TideHardwareInterface"),
-                "Sent chassis cmd to serial: vx=%.3f, vy=%.3f, wz=%.3f",
-                chassis_cmd_linear_x_, chassis_cmd_linear_y_, chassis_cmd_angular_z_);
-  }
+  // static int send_count = 0;
+  // if (++send_count % 100 == 0)  // 每100次打印一次
+  // {
+  //   RCLCPP_INFO(rclcpp::get_logger("TideHardwareInterface"),
+  //               "Sent chassis cmd to serial: vx=%.3f, vy=%.3f, wz=%.3f",
+  //               chassis_cmd_linear_x_, chassis_cmd_linear_y_, chassis_cmd_angular_z_);
+  // }
   
 
 
